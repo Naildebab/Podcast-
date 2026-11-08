@@ -1,0 +1,24 @@
+{
+  "name": "podcast-language-studio",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A local-first podcast language-learning studio",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev -w apps/server",
+    "dev:web": "npm run dev -w apps/web",
+    "build": "npm run build -w apps/web",
+    "start": "npm run start -w apps/server",
+    "test": "npm run test -w apps/server",
+    "typecheck": "npm run typecheck -w apps/server && npm run typecheck -w apps/web"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "esbuild@0.28.2": true
+  }
+}

@@ -1,0 +1,17 @@
+node_modules/
+dist/
+*.log
+.env
+.env.*
+!.env.example
+
+# Runtime data never belongs in the repository
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Local tooling
+.vite/
+coverage/
+.playwright/
