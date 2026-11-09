@@ -1,16 +1,16 @@
 # Podcast Language Studio
 
-A local-first podcast player for language learners. Phase 1 gives you a real listening
-foundation: import public RSS feeds, browse a hand-checked catalog, preview shows before
-adding them, play episodes in a persistent player, and pick up exactly where you stopped.
+A local-first podcast player for language learners. Phase 2 gives you a real listening
+foundation plus transcripts: import public RSS feeds, browse a hand-checked catalog,
+preview shows before adding them, play episodes in a persistent player, and read along
+with publisher or imported transcripts.
 
-No account. No API keys. No analytics. Your library and listening positions live in a
-SQLite file on your own computer; small display and playback preferences stay in browser
-local storage.
+No account. No API keys. No analytics. Your library, listening positions, and transcripts
+live in a SQLite file on your own computer; small display and playback preferences stay in
+browser local storage.
 
-> Status: **Phase 1 — listening foundation**. Transcripts, vocabulary, shadowing, and
-> Android are planned for later phases. Labels in the interface say “Soon” when a feature
-> is not built yet.
+> Status: **Phase 2 — transcripts**. Vocabulary, shadowing, and Android are planned for
+> later phases. Labels in the interface say “Soon” when a feature is not built yet.
 
 ## What works
 
@@ -30,19 +30,48 @@ local storage.
   same local progress table.
 - **Episode library** — search all saved episodes, filter by progress, and page through
   large feeds without rendering thousands of rows at once.
+- **Transcripts** — load a transcript advertised by a feed, or import your own WebVTT,
+  SubRip, Podcasting 2.0 JSON, or plain-text file. Timed transcripts highlight the current
+  line, scroll with playback, and let you click a timestamp to seek. Untimed text is kept
+  as a reading view. Transcripts are stored locally and fetched only when you ask.
 - **Light / dark / system theme** — applied before paint to avoid a flash, and remembered
   in local storage.
 - **Responsive interface** — desktop sidebar, mobile top navigation, bottom mini player,
   and layouts that work down to phone widths.
 - **Local server hardening** — private, loopback, and link-local addresses are rejected
-  before every request, including each redirect hop. Downloads are capped at 20 MB and
-  requests time out after 20 seconds.
+  before every request, including each redirect hop. Feed downloads are capped at 20 MB
+  and transcript downloads at 4 MB; requests time out after 20 seconds.
+
+## Transcripts
+
+Transcripts are deliberately **on demand**. Opening an episode page does not contact the
+publisher for a transcript. If the feed advertises one, you choose “Load transcript”; the
+server fetches it through the same SSRF-safe path, parses it, and stores the cues in
+SQLite. Later visits read the local copy.
+
+Supported inputs:
+
+- WebVTT (`.vtt`), including voice tags and cue settings
+- SubRip (`.srt`)
+- Podcasting 2.0 JSON (`segments` with `startTime`, `endTime`, `speaker`, and `text`)
+- Plain text, including optional timestamp prefixes such as `[00:01:20]`
+
+The episode page highlights the active timed line, optionally scrolls with playback, and
+lets you click a timestamp to seek there. If the episode is not loaded yet, clicking a cue
+starts it at that point. Untimed transcripts remain readable but do not follow the audio.
+You can search the transcript, reload it from its source, replace it with an imported file,
+or remove the local copy.
+
+The importer accepts pasted text or a file up to 4 MB. Publisher HTML transcript pages are
+not scraped; the app explains that limitation and keeps the manual import path available.
 
 ## Not built yet
 
-These are honest Phase 1 boundaries, not hidden buttons:
+These are honest Phase 2 boundaries, not hidden buttons:
 
-- Transcript parsing and line-synced highlighting (Phase 2)
+- Automatic speech-to-text transcription of audio
+- Translation of transcripts
+- Scraping arbitrary HTML transcript pages (paste the text instead)
 - Vocabulary collection and study sheets (Phase 3)
 - Shadowing and local recording (Phase 4)
 - OPML import/export
@@ -112,6 +141,9 @@ PODCAST_STUDIO_DATA=/path/to/podcast-data npm start
 - The database uses SQLite in WAL mode with foreign keys enabled.
 - Audio is **streamed from the publisher** and is not downloaded or copied into the
   database.
+- Transcripts are stored in the same database as parsed cues. Removing a podcast or
+  episode removes its transcript; removing a transcript does not affect the audio or your
+  progress.
 - Cover images and audio load directly from the publisher in your browser, so the
   publisher can see your IP address just as it would with any podcast app.
 - The server binds to `127.0.0.1` by default and is not exposed to your local network.
@@ -125,12 +157,15 @@ PODCAST_STUDIO_DATA=/path/to/podcast-data npm start
 
 - No accounts, tracking scripts, analytics, or third-party APIs.
 - The server only fetches a URL when you ask it to resolve, preview, add, or refresh a
-  feed.
+  feed, or when you explicitly load a transcript.
 - Before fetching, it resolves the hostname and rejects loopback, private, link-local,
   unique-local, and unspecified addresses. Redirects are followed manually, one hop at a
   time, and every hop is checked again.
-- Feed downloads are limited to 20 MB and 20 seconds.
-- Feed contents are parsed as data, never executed.
+- Feed downloads are limited to 20 MB and 20 seconds; transcript downloads are limited to
+  4 MB.
+- Feed and transcript contents are parsed as data, never executed.
+- Imported transcripts are sent only to your local server and written to your local
+  database; they are not uploaded to a third-party service.
 - The UI has no fake “implemented” states: planned practice features are visibly marked
   “Soon”.
 
@@ -158,6 +193,8 @@ instead of pretending to search it. OPML import is planned.
 │   │   │   ├── app.ts      Routes, validation, error handling, static serving
 │   │   │   ├── db.ts       Schema migrations and database opening
 │   │   │   ├── rss.ts      RSS/Atom parsing and normalization
+│   │   │   ├── transcript.ts  VTT/SRT/JSON/plain-text parsing
+│   │   │   ├── transcripts.ts Transcript and cue storage queries
 │   │   │   ├── http.ts     SSRF-safe fetch with manual redirect checks
 │   │   │   ├── discovery.ts Website/feed resolution and previews
 │   │   │   ├── catalog.ts  Curated catalog loading and search
@@ -177,25 +214,29 @@ instead of pretending to search it. OPML import is planned.
 
 All routes are under `/api`.
 
-| Method | Route                          | Purpose                                   |
-| ------ | ------------------------------ | ----------------------------------------- |
-| GET    | `/health`                      | Health check                              |
-| GET    | `/meta`                        | Version, data directory, library stats    |
-| GET    | `/discovery/catalog`           | Search/filter the curated catalog         |
-| POST   | `/discovery/resolve`           | Resolve a feed or website and preview it  |
-| GET    | `/podcasts`                    | List saved podcasts                       |
-| POST   | `/podcasts`                    | Resolve and add a podcast                 |
-| GET    | `/podcasts/:id`                | Podcast detail                            |
-| POST   | `/podcasts/:id/refresh`        | Re-fetch and upsert episodes              |
-| DELETE | `/podcasts/:id`                | Remove a podcast and its episodes         |
-| GET    | `/episodes`                    | Search, filter, and page episodes         |
-| GET    | `/episodes/:id`                | Episode detail and progress                |
-| PUT    | `/episodes/:id/progress`       | Save position and/or status               |
-| GET    | `/home`                        | Stats, continue-listening, recent episodes|
+| Method | Route                        | Purpose                                    |
+| ------ | ---------------------------- | ------------------------------------------ |
+| GET    | `/health`                    | Health check                               |
+| GET    | `/meta`                      | Version, data directory, library stats     |
+| GET    | `/discovery/catalog`         | Search/filter the curated catalog          |
+| POST   | `/discovery/resolve`         | Resolve a feed or website and preview it   |
+| GET    | `/podcasts`                  | List saved podcasts                        |
+| POST   | `/podcasts`                  | Resolve and add a podcast                  |
+| GET    | `/podcasts/:id`              | Podcast detail                             |
+| POST   | `/podcasts/:id/refresh`      | Re-fetch and upsert episodes               |
+| DELETE | `/podcasts/:id`              | Remove a podcast and its episodes          |
+| GET    | `/episodes`                  | Search, filter, and page episodes          |
+| GET    | `/episodes/:id`              | Episode detail and progress                 |
+| GET    | `/episodes/:id/transcript`   | Read the cached transcript                  |
+| POST   | `/episodes/:id/transcript`   | Load from feed/URL or import pasted text    |
+| DELETE | `/episodes/:id/transcript`   | Remove the local transcript copy            |
+| PUT    | `/episodes/:id/progress`     | Save position and/or status                |
+| GET    | `/home`                      | Stats, continue-listening, recent episodes |
 
 Errors return `{ "error": "..." }` with a meaningful status code: `400` for validation,
-`404` for missing records, `409` for duplicate feeds, `422` for feeds that cannot be read,
-and `500` for unexpected server errors.
+`404` for missing records, `409` for duplicate feeds, `413` for oversized transcript
+imports, `422` for feeds or transcripts that cannot be read, and `500` for unexpected
+server errors.
 
 ## Testing
 
@@ -207,7 +248,9 @@ npm run build
 
 The server suite covers:
 
-- RSS and Atom parsing, including durations, dates, GUID fallbacks, and transcripts
+- RSS and Atom parsing, including durations, dates, GUID fallbacks, and transcript links
+- WebVTT, SubRip, Podcasting 2.0 JSON, and plain-text transcript parsing
+- Transcript load/cache/import/delete routes, error cases, and HTML-page rejection
 - Catalog loading, categories, search, and filters
 - Feed resolution from direct URLs and website autodiscovery
 - Adding, refreshing, and deleting podcasts
@@ -215,8 +258,9 @@ The server suite covers:
 - Private/loopback address rejection, redirect re-validation, and fetch size limits
 
 The tests use fixtures and an injected fetch function, so they do not need the network.
-Manual QA should still try a real feed such as
-`https://podcasts.files.bbci.co.uk/p02pc9tn.rss` and confirm that audio plays.
+Manual QA should still try a real feed with transcripts, such as
+`https://podnews.net/rss`, and confirm that loading, seeking, and removing a transcript
+work. Also try a feed without transcripts and import a pasted VTT file.
 
 ## Design notes
 
@@ -225,14 +269,15 @@ reading pace rather than a dense dashboard. The UI is deliberately not a clone o
 existing podcast app; no Podling branding, assets, or source code is used.
 
 Technical decisions are explained in [docs/development.md](docs/development.md), including
-why the project uses SQLite, why discovery is API-free, how SSRF protection works, and how
-playback progress is saved.
+why the project uses SQLite, why discovery is API-free, how SSRF protection works, how
+playback progress is saved, and how transcripts are fetched, parsed, and stored.
 
 ## Roadmap
 
 - **Phase 1 (done)** — library, RSS import, catalog discovery, global player, saved
   positions, themes, responsive UI.
-- **Phase 2** — transcript parsing and line-synced display.
+- **Phase 2 (done)** — feed and imported transcripts, line-synced highlighting,
+  click-to-seek, search, and local transcript storage.
 - **Phase 3** — vocabulary collection and study sheets.
 - **Phase 4** — shadowing loops and local recording.
 - **Later** — OPML import/export, offline audio, Android client.

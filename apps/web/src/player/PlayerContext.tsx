@@ -27,6 +27,7 @@ export interface PlayerTime {
 
 export interface PlayerActions {
   play: (episode: Episode) => void;
+  playAt: (episode: Episode, seconds: number) => void;
   toggle: () => void;
   pause: () => void;
   seek: (seconds: number) => void;
@@ -130,14 +131,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   );
 
   const loadAndPlay = useCallback(
-    (next: Episode) => {
+    (next: Episode, startMs?: number) => {
       const audio = audioRef.current;
       if (!audio) return;
 
       episodeRef.current = next;
       suppressPauseSaveRef.current = true;
       pendingSeekRef.current =
-        next.status !== "completed" && next.positionMs > 0 ? next.positionMs : 0;
+        startMs ?? (next.status !== "completed" && next.positionMs > 0 ? next.positionMs : 0);
       lastSavedRef.current = 0;
 
       commitSnapshot({
@@ -219,6 +220,23 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       persist(next * 1000);
     },
     [commitTime, persist],
+  );
+
+  const playAt = useCallback(
+    (next: Episode, seconds: number) => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      const target = Math.max(0, seconds);
+
+      if (episodeRef.current?.id === next.id && !audio.error) {
+        seek(target);
+        if (audio.paused) toggle();
+        return;
+      }
+
+      loadAndPlay(next, Math.round(target * 1000));
+    },
+    [loadAndPlay, seek, toggle],
   );
 
   const skip = useCallback(
@@ -550,6 +568,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const actions = useMemo<PlayerActions>(
     () => ({
       play,
+      playAt,
       toggle,
       pause,
       seek,
@@ -562,6 +581,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }),
     [
       play,
+      playAt,
       toggle,
       pause,
       seek,

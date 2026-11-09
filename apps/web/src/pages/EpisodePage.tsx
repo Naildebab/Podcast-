@@ -4,13 +4,12 @@ import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
 import { Cover } from "../components/Cover";
 import { FullPlayer } from "../components/FullPlayer";
+import { TranscriptPanel } from "../components/TranscriptPanel";
 import {
   ArrowLeftIcon,
   BookIcon,
   CheckIcon,
   ClockIcon,
-  ExternalIcon,
-  LinkIcon,
   RefreshIcon,
 } from "../components/Icons";
 import { ErrorPanel, Notice, Skeleton } from "../components/Notice";
@@ -226,36 +225,6 @@ export function EpisodePage() {
 
           <section className="rounded-3xl border border-line bg-surface p-5">
             <div className="flex items-center gap-2">
-              <LinkIcon size={17} className="text-pine" />
-              <h2 className="font-serif text-xl text-fg">Transcript</h2>
-            </div>
-            {episode.transcriptUrl ? (
-              <>
-                <p className="mt-2 text-xs leading-relaxed text-muted">
-                  This feed advertises a transcript
-                  {episode.transcriptType ? ` (${episode.transcriptType})` : ""}. The
-                  synchronized reading view is planned for Phase 2; the publisher's link is
-                  available now.
-                </p>
-                <a
-                  href={episode.transcriptUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-pine hover:underline"
-                >
-                  Open transcript source <ExternalIcon size={13} />
-                </a>
-              </>
-            ) : (
-              <p className="mt-2 text-xs leading-relaxed text-muted">
-                This feed does not advertise a transcript. Phase 2 will add local
-                transcript import and line-synced playback.
-              </p>
-            )}
-          </section>
-
-          <section className="rounded-3xl border border-line bg-surface p-5">
-            <div className="flex items-center gap-2">
               <ClockIcon size={17} className="text-muted" />
               <h2 className="font-serif text-xl text-fg">Details</h2>
             </div>
@@ -284,6 +253,8 @@ export function EpisodePage() {
           </section>
         </aside>
       </div>
+
+      <TranscriptPanel episode={episode} />
     </div>
   );
 }

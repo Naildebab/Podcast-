@@ -36,6 +36,29 @@ export interface Episode {
   status: ProgressStatus;
 }
 
+export type TranscriptFormat = "vtt" | "srt" | "json" | "text";
+export type TranscriptOrigin = "feed" | "manual";
+
+export interface TranscriptCue {
+  index: number;
+  startMs: number | null;
+  endMs: number | null;
+  speaker: string | null;
+  text: string;
+}
+
+export interface Transcript {
+  episodeId: number;
+  sourceUrl: string | null;
+  format: TranscriptFormat;
+  origin: TranscriptOrigin;
+  language: string | null;
+  timed: boolean;
+  cueCount: number;
+  importedAt: string;
+  cues: TranscriptCue[];
+}
+
 export interface CatalogPodcast {
   id: string;
   title: string;

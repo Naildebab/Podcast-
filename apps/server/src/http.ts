@@ -7,11 +7,22 @@ export interface FetchedText {
   contentType: string;
 }
 
-export type FetchText = (url: string) => Promise<FetchedText>;
+export interface FetchOptions {
+  /** Upper bound for the response body. Defaults to 20 MB. */
+  maxBytes?: number;
+  /** Request timeout. Defaults to 20 seconds. */
+  timeoutMs?: number;
+  /** Custom Accept header for a specific kind of resource. */
+  accept?: string;
+}
+
+export type FetchText = (url: string, options?: FetchOptions) => Promise<FetchedText>;
 
 const MAX_BYTES = 20 * 1024 * 1024;
 const TIMEOUT_MS = 20_000;
 const MAX_REDIRECTS = 5;
+const DEFAULT_ACCEPT =
+  "application/rss+xml, application/atom+xml, application/xml, text/xml, text/html, */*";
 
 /**
  * Local apps can be tricked into fetching internal addresses. Reject
@@ -80,17 +91,22 @@ export async function assertPublicUrl(raw: string): Promise<URL> {
   return url;
 }
 
-export const realFetchText: FetchText = async (input: string): Promise<FetchedText> => {
+export const realFetchText: FetchText = async (
+  input: string,
+  options: FetchOptions = {},
+): Promise<FetchedText> => {
+  const maxBytes = options.maxBytes ?? MAX_BYTES;
+  const timeoutMs = options.timeoutMs ?? TIMEOUT_MS;
+  const accept = options.accept ?? DEFAULT_ACCEPT;
   let current = await assertPublicUrl(input);
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
     const response = await fetch(current, {
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
       redirect: "manual",
       headers: {
-        "User-Agent": "PodcastLanguageStudio/0.1 (+local personal podcast app)",
-        Accept:
-          "application/rss+xml, application/atom+xml, application/xml, text/xml, text/html, */*",
+        "User-Agent": "PodcastLanguageStudio/0.2 (+local personal podcast app)",
+        Accept: accept,
       },
     });
 
@@ -115,13 +131,13 @@ export const realFetchText: FetchText = async (input: string): Promise<FetchedTe
     }
 
     const declaredLength = Number(response.headers.get("content-length") ?? 0);
-    if (declaredLength > MAX_BYTES) {
+    if (declaredLength > maxBytes) {
       await response.body?.cancel().catch(() => undefined);
       throw new Error("That file is too large to read safely.");
     }
 
     const body = await response.text();
-    if (Buffer.byteLength(body, "utf8") > MAX_BYTES) {
+    if (Buffer.byteLength(body, "utf8") > maxBytes) {
       throw new Error("That file is too large to read safely.");
     }
 

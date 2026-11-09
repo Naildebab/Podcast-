@@ -173,7 +173,8 @@ export function Settings() {
             {
               phase: "Phase 2",
               title: "Transcripts",
-              body: "Parse and display publisher transcripts with line-synced highlighting.",
+              body: "Publisher and pasted transcripts, line-synced highlighting, and click-to-seek reading.",
+              done: true,
             },
             {
               phase: "Phase 3",
@@ -204,8 +205,8 @@ export function Settings() {
           ))}
         </div>
         <Notice className="mt-4">
-          Android is a later phase. Phase 1 is a local web app; no mobile build has been
-          started.
+          Android is a later phase. Phase 2 is still a local web app; no mobile build has
+          been started.
         </Notice>
       </section>
     </div>

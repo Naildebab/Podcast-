@@ -1,6 +1,6 @@
 # Development notes
 
-This document records the architecture and the decisions behind Phase 1. It is meant for
+This document records the architecture and the decisions behind Phase 2. It is meant for
 whoever maintains the project next — including future me.
 
 ## Stack
@@ -67,6 +67,20 @@ keys are enabled on every connection. The old prototype directory
 - `transcript_url`, `transcript_type`, `created_at`
 - unique `(podcast_id, guid)`
 
+`transcripts`
+
+- one row per cached episode transcript: `episode_id` primary key, `source_url`, `format`,
+  `origin` (`feed` or `manual`), `language`, `timed`, `cue_count`, `imported_at`
+- cascade delete when an episode or podcast is removed
+
+`transcript_cues`
+
+- one row per line: `episode_id`, `cue_index`, nullable `start_ms` and `end_ms`,
+  `speaker`, `text`
+- unique `(episode_id, cue_index)`; indexed by `(episode_id, start_ms)`
+- cascade delete when an episode or podcast is removed; deleted explicitly when a
+  transcript is replaced or removed
+
 `progress`
 
 - one row per episode: `position_ms`, `status` (`new`, `in_progress`, `completed`),
@@ -75,7 +89,7 @@ keys are enabled on every connection. The old prototype directory
 
 `settings`
 
-- reserved for later server-side preferences. Phase 1 theme, playback speed, and volume are
+- reserved for later server-side preferences. Theme, playback speed, and volume are
   intentionally browser-local (`localStorage`) because they are device preferences, not
   library data.
 
@@ -105,6 +119,52 @@ entry.
 - Audio enclosure selection; episodes without a usable audio URL are skipped
 
 The parser treats XML as data. It does not execute scripts or resolve entities.
+
+## Transcript pipeline
+
+Transcripts are **not** fetched when an episode page opens. The page first asks
+`GET /api/episodes/:id/transcript` for a local copy. If none exists, the user can choose
+“Load transcript” (feed URL), or import pasted text/a file. This keeps network behavior
+explicit and local-first.
+
+### Fetching
+
+`loadTranscriptFromUrl` in `app.ts` reuses the injected `fetchText` layer, with:
+
+- a 4 MB body cap (the feed path keeps its 20 MB cap)
+- the same DNS/private-address checks and redirect validation
+- rejection of `image/*`, `audio/*`, `video/*`, NUL-containing bodies, and HTML pages
+- a clear 422 error explaining that HTML transcript pages must be pasted manually
+
+The final URL after redirects is stored as `source_url`. Reloading a feed transcript calls
+the feed again; reloading an imported URL calls that URL.
+
+### Parsing and normalization
+
+`apps/server/src/transcript.ts` owns format detection and parsing:
+
+- **WebVTT** — `WEBVTT` header, cue identifiers, settings after the timestamp, NOTE/STYLE
+  blocks, `<v Speaker>` voices, inline tags, and entities
+- **SubRip** — comma decimal timestamps, numeric cue indexes, multiline cue text
+- **Podcasting 2.0 JSON** — `segments`, `transcript`, or `cues` arrays; `startTime`/
+  `endTime` seconds; `startMs`/`endMs` milliseconds; `text`/`body`/`transcript`/
+  `content`; optional speaker
+- **Plain text** — timestamp prefixes such as `[00:01:20]`, `00:01:20`, or `01:20`;
+  otherwise blank-line-separated paragraphs become untimed reading blocks
+
+All parsers strip markup, decode entities, separate an obvious `Speaker:` prefix, sort
+cues by start time, discard empty lines, and cap the result at 50,000 cues. If the caller
+supplies a format hint and it produces nothing, the parser retries once with the detected
+format. A transcript with no readable cues is a 422, not an empty cached record.
+
+`transcripts.ts` replaces the transcript and all cue rows in one SQLite transaction, so a
+failed re-import cannot leave a half-written transcript.
+
+### Cue storage
+
+Times are stored as integer milliseconds with nullable starts. Nullable starts let plain
+text use the same table as timed subtitles. An end time is kept only when it is positive
+and later than the start. The UI treats a missing end as “active until the next cue”.
 
 ## Discovery without an API
 
@@ -140,14 +200,15 @@ network. `http.ts` therefore:
 - Resolves DNS and checks every returned address before the request.
 - Uses `redirect: "manual"` and validates each redirect target before following it.
 - Follows at most five redirects.
-- Caps the response at 20 MB (declared and actual body).
+- Caps feed/website responses at 20 MB and transcript responses at 4 MB (declared and
+  actual body).
 - Times out after 20 seconds.
 - Rejects non-success statuses with a readable error.
 
 A DNS-rebinding race is still theoretically possible between the check and the connection.
 The server binds to localhost by default and the app is single-user; this is a deliberate
-Phase 1 trade-off. A future hardening step could pin the resolved address into the request
-or use a proxy that enforces the same policy.
+trade-off. A future hardening step could pin the resolved address into the request or use a
+proxy that enforces the same policy.
 
 The fetch function is injected into `createApp` (`AppOptions.fetchText`), which makes the
 API and discovery tests fast and deterministic.
@@ -169,8 +230,16 @@ All responses are JSON except `204` deletes. Errors are `{ "error": "..." }`.
 | DELETE | `/api/podcasts/:id`           | Cascade delete                                     |
 | GET    | `/api/episodes`               | `podcastId`, `q`, `status`, `limit`, `offset`      |
 | GET    | `/api/episodes/:id`           | Episode plus progress                              |
+| GET    | `/api/episodes/:id/transcript`| Cached transcript or `{ transcript: null }`        |
+| POST   | `/api/episodes/:id/transcript`| `{ source: "feed" \| "url" \| "text", ... }`       |
+| DELETE | `/api/episodes/:id/transcript`| Remove transcript and cues                         |
 | PUT    | `/api/episodes/:id/progress`  | `{ positionMs, status? }`                          |
 | GET    | `/api/home`                   | Stats, continue-listening, recent episodes         |
+
+Transcript imports accept `url` for a custom fetch, `text` plus optional `format`, and an
+optional `language`. The body limit is 6 MB so a 4 MB text payload fits after JSON
+escaping; the schema still caps pasted text at 4,000,000 characters. Oversized JSON
+bodies return 413.
 
 New API routes must be declared before the `/api` 404 middleware. Unknown API routes return
 a JSON 404; non-API routes fall through to the SPA shell when static files are present.
@@ -195,6 +264,13 @@ a JSON 404; non-API routes fall through to the SPA shell when static files are p
     control
   - Media Session metadata and action handlers where supported
   - persisted speed and volume in `localStorage`
+  - `playAt(episode, seconds)`, which starts a new episode at a transcript cue without
+    racing metadata loading, or seeks and resumes the current episode
+- `components/TranscriptPanel.tsx` owns the local transcript request, import modal,
+  reload/remove controls, search, follow toggle, and cue list. It only subscribes to player
+  time inside the reader, computes the active cue with a binary search, and scrolls the
+  transcript container rather than the page. A missing end time keeps the cue active until
+  the next cue.
 - The mini player hides itself on the page of the episode it is playing, so it does not
   duplicate or overlap the full player. On desktop it starts to the right of the sidebar.
 - `theme/ThemeContext.tsx` stores `theme` as `light`, `dark`, or `system`; an inline script
@@ -204,6 +280,9 @@ a JSON 404; non-API routes fall through to the SPA shell when static files are p
 
 - `play(episode)` toggles if the same episode is already loaded and healthy; otherwise it
   resets the source, seeks to the stored position, and calls `audio.play()`.
+- `playAt(episode, seconds)` behaves like `play` but uses the cue time instead of the saved
+  position when loading a different episode. For the current episode it seeks immediately
+  and resumes if paused.
 - A completed episode starts at 0.
 - Seeking writes the new position immediately.
 - `onEnded` saves position 0 with `completed`.
@@ -231,8 +310,11 @@ Planned practice areas are rendered as disabled “Soon” items, not clickable 
 
 `npm test` runs `apps/server/test` with Vitest:
 
-- `rss.test.ts` — feed formats, dates, durations, GUIDs, audio selection, transcripts
-- `api.test.ts` — catalog, discovery, library CRUD, episodes, progress, error cases
+- `rss.test.ts` — feed formats, dates, durations, GUIDs, audio selection, transcript links
+- `transcript.test.ts` — VTT/SRT/JSON/plain text, voices, entities, timestamp prefixes,
+  fallback detection, and unreadable input
+- `api.test.ts` — catalog, discovery, library CRUD, episodes, progress, transcript
+  load/cache/import/delete, HTML rejection, and error cases
 - `http.test.ts` — public/private address policy, manual redirects, size limits
 
 Tests inject a fake `fetchText`; they never depend on a live publisher. A temp SQLite
@@ -245,8 +327,12 @@ Manual checks after changes:
 3. `npm run build`
 4. Start the server, add a real feed, play an episode, seek, reload, and confirm the
    position returns.
-5. Check the mini player across routes and the full player on the episode route.
-6. Check light/dark and a 390px-wide viewport.
+5. Add a real podcast with transcripts (for example `https://podnews.net/rss`), load a
+   transcript, click a cue, confirm the active line follows playback, search the
+   transcript, reload it, and remove the local copy.
+6. Import a pasted VTT/SRT/JSON/plain-text file for an episode without a feed transcript.
+7. Check the mini player across routes and the full player on the episode route.
+8. Check light/dark and a 390px-wide viewport.
 
 ## Common maintenance tasks
 
@@ -272,12 +358,22 @@ unexpected error. Add API coverage in `api.test.ts`.
 
 Keep the single audio element. Avoid creating a second `<audio>` for a second screen; that
 would break resume and duplicate sound. Update progress through the existing `persist`
-helper so keepalive/page-hide behavior stays consistent.
+helper so keepalive/page-hide behavior stays consistent. If you add a new seek entry point,
+use `playAt` rather than assigning `audio.currentTime` before metadata has loaded.
 
-## Deliberate non-goals in Phase 1
+### Add a transcript format
 
+Add a parser in `transcript.ts`, extend `TranscriptFormat` and `transcriptFormatFrom`, and
+make `detectTranscriptFormat` recognize the format. Normalize every parser through
+`normalizeCues`, then add parser and API tests. The UI consumes the same cue shape, so no
+schema change is needed unless the format adds new metadata.
+
+## Deliberate non-goals in Phase 2
+
+- Automatic speech-to-text transcription
+- Translation
+- Scraping arbitrary HTML transcript pages
 - Offline audio downloads (audio is streamed)
-- Transcript display (URLs are parsed and stored; the episode page shows a placeholder)
 - Vocabulary, shadowing, and recording
 - OPML import/export
 - Android

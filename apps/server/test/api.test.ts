@@ -8,6 +8,15 @@ import { addPodcast } from "../src/library.js";
 import { parseFeed } from "../src/rss.js";
 import { SAMPLE_RSS, SAMPLE_RSS_WITH_THIRD, SAMPLE_SITE } from "./fixtures.js";
 
+const SAMPLE_VTT = `WEBVTT
+
+00:00:01.000 --> 00:00:03.000
+<v Host>Welcome to the test.
+
+00:00:04.000 --> 00:00:06.000
+This is the second line.
+`;
+
 let db: Db;
 let server: Server;
 let base: string;
@@ -62,6 +71,22 @@ beforeEach(async () => {
         contentType: "text/html",
       },
     ],
+    [
+      "https://example.com/one.vtt",
+      {
+        text: SAMPLE_VTT,
+        finalUrl: "https://example.com/one.vtt",
+        contentType: "text/vtt; charset=utf-8",
+      },
+    ],
+    [
+      "https://example.com/transcript-page",
+      {
+        text: "<html><body>Not a file.</body></html>",
+        finalUrl: "https://example.com/transcript-page",
+        contentType: "text/html; charset=utf-8",
+      },
+    ],
   ]);
 
   const fetchText: FetchText = async (url) => {
@@ -84,7 +109,7 @@ describe("health and metadata", () => {
   it("reports that the local server is ready", async () => {
     const response = await api("/api/health");
     expect(response.status).toBe(200);
-    expect(response.body).toMatchObject({ ok: true, phase: 1 });
+    expect(response.body).toMatchObject({ ok: true, phase: 2 });
   });
 });
 
@@ -310,5 +335,124 @@ describe("library and episodes", () => {
         })
       ).status,
     ).toBe(400);
+  });
+});
+
+describe("transcripts", () => {
+  async function addTestPodcast() {
+    const added = await api("/api/podcasts", {
+      method: "POST",
+      body: JSON.stringify({ feedUrl: "https://example.com/feed.xml" }),
+    });
+    const episodes = await api(`/api/episodes?podcastId=${added.body.podcast.id}`);
+    return episodes.body.episodes as Array<{
+      id: number;
+      title: string;
+      transcriptUrl: string | null;
+    }>;
+  }
+
+  it("loads a feed transcript, caches it locally, and removes it", async () => {
+    const episodes = await addTestPodcast();
+    const episode = episodes.find((item) => item.title === "Episode One & Friends")!;
+    expect(episode.transcriptUrl).toBe("https://example.com/one.vtt");
+
+    const empty = await api(`/api/episodes/${episode.id}/transcript`);
+    expect(empty.status).toBe(200);
+    expect(empty.body.transcript).toBeNull();
+
+    const loaded = await api(`/api/episodes/${episode.id}/transcript`, {
+      method: "POST",
+      body: JSON.stringify({ source: "feed" }),
+    });
+    expect(loaded.status).toBe(201);
+    expect(loaded.body.transcript).toMatchObject({
+      episodeId: episode.id,
+      sourceUrl: "https://example.com/one.vtt",
+      format: "vtt",
+      origin: "feed",
+      timed: true,
+      cueCount: 2,
+    });
+    expect(loaded.body.transcript.cues[0]).toMatchObject({
+      index: 0,
+      startMs: 1000,
+      endMs: 3000,
+      speaker: "Host",
+      text: "Welcome to the test.",
+    });
+
+    const cached = await api(`/api/episodes/${episode.id}/transcript`);
+    expect(cached.body.transcript.importedAt).toBe(loaded.body.transcript.importedAt);
+    expect(cached.body.transcript.cues).toHaveLength(2);
+
+    const removed = await api(`/api/episodes/${episode.id}/transcript`, {
+      method: "DELETE",
+    });
+    expect(removed.status).toBe(204);
+    expect((await api(`/api/episodes/${episode.id}/transcript`)).body.transcript).toBeNull();
+  });
+
+  it("imports pasted text for an episode without a feed transcript", async () => {
+    const episodes = await addTestPodcast();
+    const episode = episodes.find((item) => item.title === "Episode Two")!;
+
+    const noSource = await api(`/api/episodes/${episode.id}/transcript`, {
+      method: "POST",
+      body: JSON.stringify({ source: "feed" }),
+    });
+    expect(noSource.status).toBe(422);
+    expect(noSource.body.error).toMatch(/does not advertise/i);
+
+    const imported = await api(`/api/episodes/${episode.id}/transcript`, {
+      method: "POST",
+      body: JSON.stringify({
+        text: "00:01 Hello there.\n00:03 Next line.",
+        format: "text",
+      }),
+    });
+    expect(imported.status).toBe(201);
+    expect(imported.body.transcript).toMatchObject({
+      origin: "manual",
+      sourceUrl: null,
+      format: "text",
+      timed: true,
+      cueCount: 2,
+    });
+    expect(imported.body.transcript.cues[1]).toMatchObject({
+      startMs: 3000,
+      text: "Next line.",
+    });
+  });
+
+  it("rejects HTML pages and invalid JSON", async () => {
+    const episodes = await addTestPodcast();
+    const episode = episodes.find((item) => item.title === "Episode Two")!;
+
+    const html = await api(`/api/episodes/${episode.id}/transcript`, {
+      method: "POST",
+      body: JSON.stringify({ source: "url", url: "https://example.com/transcript-page" }),
+    });
+    expect(html.status).toBe(422);
+    expect(html.body.error).toMatch(/web page/i);
+
+    const invalid = await api(`/api/episodes/${episode.id}/transcript`, {
+      method: "POST",
+      body: JSON.stringify({ text: "{not json", format: "json" }),
+    });
+    expect(invalid.status).toBe(422);
+    expect(invalid.body.error).toMatch(/valid JSON/i);
+  });
+
+  it("returns 404 for an unknown episode", async () => {
+    expect((await api("/api/episodes/999/transcript")).status).toBe(404);
+    expect(
+      (
+        await api("/api/episodes/999/transcript", {
+          method: "POST",
+          body: JSON.stringify({ source: "feed" }),
+        })
+      ).status,
+    ).toBe(404);
   });
 });

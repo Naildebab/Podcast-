@@ -56,6 +56,32 @@ const MIGRATIONS: string[] = [
     value TEXT NOT NULL
   );
   `,
+  `
+  CREATE TABLE transcripts (
+    episode_id INTEGER PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+    source_url TEXT,
+    format TEXT NOT NULL,
+    origin TEXT NOT NULL CHECK (origin IN ('feed', 'manual')),
+    language TEXT,
+    timed INTEGER NOT NULL DEFAULT 0,
+    cue_count INTEGER NOT NULL DEFAULT 0,
+    imported_at TEXT NOT NULL
+  );
+
+  CREATE TABLE transcript_cues (
+    id INTEGER PRIMARY KEY,
+    episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    cue_index INTEGER NOT NULL,
+    start_ms INTEGER,
+    end_ms INTEGER,
+    speaker TEXT,
+    text TEXT NOT NULL,
+    UNIQUE (episode_id, cue_index)
+  );
+
+  CREATE INDEX idx_transcript_cues_episode_start
+    ON transcript_cues(episode_id, start_ms);
+  `,
 ];
 
 export function migrate(db: Db): void {

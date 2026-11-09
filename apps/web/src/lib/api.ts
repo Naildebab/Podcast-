@@ -8,6 +8,8 @@ import type {
   PodcastResponse,
   ProgressStatus,
   ResolveResponse,
+  Transcript,
+  TranscriptFormat,
 } from "./types";
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -89,6 +91,27 @@ export const api = {
   ) => request<EpisodeListResponse>(`/api/episodes${queryString(params)}`),
 
   episode: (id: number) => request<{ episode: Episode }>(`/api/episodes/${id}`),
+
+  transcript: (id: number) =>
+    request<{ transcript: Transcript | null }>(`/api/episodes/${id}/transcript`),
+
+  importTranscript: (
+    id: number,
+    input: {
+      source: "feed" | "url" | "text";
+      url?: string;
+      text?: string;
+      format?: TranscriptFormat;
+      language?: string;
+    },
+  ) =>
+    request<{ transcript: Transcript }>(`/api/episodes/${id}/transcript`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+
+  deleteTranscript: (id: number) =>
+    request<void>(`/api/episodes/${id}/transcript`, { method: "DELETE" }),
 
   saveProgress: (id: number, positionMs: number, status?: ProgressStatus) =>
     request<{

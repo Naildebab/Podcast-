@@ -192,7 +192,7 @@ export function Layout() {
         <main className="mx-auto w-full max-w-[1180px] px-4 pb-44 pt-6 sm:px-6 md:px-10 md:pt-10">
           <Outlet />
           <footer className="mt-16 flex flex-col items-start justify-between gap-2 border-t border-line pt-5 text-[0.68rem] text-muted sm:flex-row sm:items-center">
-            <span>Podcast Language Studio · Phase 1</span>
+            <span>Podcast Language Studio · Phase 2</span>
             <span>Local data. No accounts. No tracking.</span>
           </footer>
         </main>

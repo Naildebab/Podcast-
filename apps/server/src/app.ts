@@ -23,6 +23,13 @@ import {
   saveProgress,
 } from "./library.js";
 import { looksLikeFeed, parseFeed, type ParsedFeed } from "./rss.js";
+import { parseTranscript, TranscriptParseError, type TranscriptFormat } from "./transcript.js";
+import {
+  deleteTranscript,
+  getTranscript,
+  saveTranscript,
+  type StoredTranscript,
+} from "./transcripts.js";
 
 export class HttpError extends Error {
   constructor(
@@ -60,6 +67,91 @@ const progressSchema = z.object({
   status: z.enum(["new", "in_progress", "completed"]).optional(),
 });
 
+const transcriptFormatSchema = z.enum(["vtt", "srt", "json", "text"]);
+
+const transcriptImportSchema = z.object({
+  source: z.enum(["feed", "url", "text"]).optional(),
+  url: z.string().trim().min(1, "Paste a transcript address first.").max(2000).optional(),
+  text: z.string().min(1, "Paste a transcript first.").max(4_000_000).optional(),
+  format: transcriptFormatSchema.optional(),
+  language: z.string().trim().max(20).optional(),
+});
+
+const TRANSCRIPT_MAX_BYTES = 4 * 1024 * 1024;
+const TRANSCRIPT_ACCEPT =
+  "text/vtt, application/x-subrip, text/srt, application/json, text/plain, */*";
+
+function payloadTooLarge(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "type" in error &&
+    (error as { type?: unknown }).type === "entity.too.large"
+  );
+}
+
+function isBinaryContentType(contentType: string): boolean {
+  const type = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  return type.startsWith("image/") || type.startsWith("audio/") || type.startsWith("video/");
+}
+
+async function loadTranscriptFromUrl(
+  url: string,
+  fetchText: FetchText,
+  options: { language?: string | null; format?: TranscriptFormat } = {},
+): Promise<{ parsed: ReturnType<typeof parseTranscript>; sourceUrl: string }> {
+  try {
+    const fetched = await fetchText(url, {
+      maxBytes: TRANSCRIPT_MAX_BYTES,
+      timeoutMs: 20_000,
+      accept: TRANSCRIPT_ACCEPT,
+    });
+
+    if (isBinaryContentType(fetched.contentType)) {
+      throw new Error("That link returned an image, audio, or video file, not a transcript.");
+    }
+    if (
+      !/^\s*WEBVTT(?:[ \t]|\r?\n|$)/i.test(fetched.text) &&
+      (fetched.contentType.toLowerCase().includes("text/html") ||
+        /^\s*(?:<!doctype html|<html[\s>])/i.test(fetched.text))
+    ) {
+      throw new Error(
+        "That link returned a web page, not a transcript file. Paste the transcript text instead.",
+      );
+    }
+    if (fetched.text.includes("\u0000")) {
+      throw new Error("That link returned a binary file, not a transcript.");
+    }
+
+    const parsed = parseTranscript(fetched.text, {
+      contentType: fetched.contentType,
+      format: options.format,
+      language: options.language,
+    });
+    return { parsed, sourceUrl: fetched.finalUrl };
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(422, messageOf(error));
+  }
+}
+
+function saveTranscriptOrThrow(
+  db: Db,
+  episodeId: number,
+  parsed: ReturnType<typeof parseTranscript>,
+  sourceUrl: string | null,
+  origin: "feed" | "manual",
+): StoredTranscript {
+  try {
+    return saveTranscript(db, episodeId, parsed, { sourceUrl, origin });
+  } catch (error) {
+    if (error instanceof TranscriptParseError) {
+      throw new HttpError(422, error.message);
+    }
+    throw error;
+  }
+}
+
 function parseId(raw: string): number {
   const id = Number(raw);
   if (!Number.isInteger(id) || id <= 0) {
@@ -85,16 +177,16 @@ export function createApp(db: Db, options: AppOptions = {}): express.Express {
   const fetchText = options.fetchText ?? realFetchText;
 
   app.disable("x-powered-by");
-  app.use(express.json({ limit: "100kb" }));
+  app.use(express.json({ limit: "6mb" }));
 
   app.get("/api/health", (_req, res) => {
-    res.json({ ok: true, version: "0.1.0", phase: 1 });
+    res.json({ ok: true, version: "0.2.0", phase: 2 });
   });
 
   app.get("/api/meta", (_req, res) => {
     res.json({
-      version: "0.1.0",
-      phase: 1,
+      version: "0.2.0",
+      phase: 2,
       dataDir: dataDir(),
       stats: getStats(db),
     });
@@ -207,6 +299,80 @@ export function createApp(db: Db, options: AppOptions = {}): express.Express {
     res.json({ episode });
   });
 
+  // --- Transcripts --------------------------------------------------------
+
+  app.get("/api/episodes/:id/transcript", (req, res) => {
+    const episode = getEpisode(db, parseId(req.params.id));
+    if (!episode) throw new HttpError(404, "That episode could not be found.");
+    res.json({ transcript: getTranscript(db, episode.id) });
+  });
+
+  app.post("/api/episodes/:id/transcript", async (req, res) => {
+    const episode = getEpisode(db, parseId(req.params.id));
+    if (!episode) throw new HttpError(404, "That episode could not be found.");
+
+    const body = transcriptImportSchema.parse(req.body);
+    const source = body.source ?? (body.text ? "text" : body.url ? "url" : "feed");
+    const language = body.language ?? null;
+
+    let parsed;
+    let sourceUrl: string | null = null;
+    let origin: "feed" | "manual" = "manual";
+
+    if (source === "feed") {
+      if (!episode.transcriptUrl) {
+        throw new HttpError(
+          422,
+          "This episode does not advertise a transcript. Paste one manually or add a transcript address.",
+        );
+      }
+      const loaded = await loadTranscriptFromUrl(episode.transcriptUrl, fetchText, {
+        format: body.format,
+        language,
+      });
+      parsed = loaded.parsed;
+      sourceUrl = loaded.sourceUrl;
+      origin = "feed";
+    } else if (source === "url") {
+      if (!body.url) {
+        throw new HttpError(400, "Paste a transcript address first.");
+      }
+      const loaded = await loadTranscriptFromUrl(body.url, fetchText, {
+        format: body.format,
+        language,
+      });
+      parsed = loaded.parsed;
+      sourceUrl = loaded.sourceUrl;
+      origin = "manual";
+    } else {
+      if (!body.text) {
+        throw new HttpError(400, "Paste a transcript first.");
+      }
+      try {
+        parsed = parseTranscript(body.text, {
+          format: body.format,
+          language,
+        });
+      } catch (error) {
+        if (error instanceof TranscriptParseError) {
+          throw new HttpError(422, error.message);
+        }
+        throw error;
+      }
+      origin = "manual";
+    }
+
+    const transcript = saveTranscriptOrThrow(db, episode.id, parsed, sourceUrl, origin);
+    res.status(201).json({ transcript });
+  });
+
+  app.delete("/api/episodes/:id/transcript", (req, res) => {
+    const episode = getEpisode(db, parseId(req.params.id));
+    if (!episode) throw new HttpError(404, "That episode could not be found.");
+    deleteTranscript(db, episode.id);
+    res.status(204).end();
+  });
+
   app.put("/api/episodes/:id/progress", (req, res) => {
     const id = parseId(req.params.id);
     const body = progressSchema.parse(req.body);
@@ -255,6 +421,12 @@ export function createApp(db: Db, options: AppOptions = {}): express.Express {
   // --- Errors -------------------------------------------------------------
 
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (payloadTooLarge(error)) {
+      res.status(413).json({
+        error: "That transcript is too large. The limit is about 4 MB of text.",
+      });
+      return;
+    }
     if (error instanceof ZodError) {
       const first = error.issues[0];
       res.status(400).json({
