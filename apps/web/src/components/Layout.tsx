@@ -96,13 +96,17 @@ export function Layout() {
             >
               <BookIcon size={19} /> Dictionary
             </Link>
-            <span
-              aria-disabled="true"
-              className="flex cursor-not-allowed items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-muted/60"
-              title="Planned for Phase 4"
+            <Link
+              to="/vocabulary"
+              className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition ${
+                isActivePath(pathname, "/vocabulary")
+                  ? "bg-accent-soft text-accent-strong"
+                  : "text-muted hover:bg-surface-2 hover:text-fg"
+              }`}
+              aria-current={isActivePath(pathname, "/vocabulary") ? "page" : undefined}
             >
-              <SparklesIcon size={19} /> Vocabulary <Badge tone="outline">Soon</Badge>
-            </span>
+              <SparklesIcon size={19} /> Vocabulary
+            </Link>
             <span
               aria-disabled="true"
               className="flex cursor-not-allowed items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-muted/60"
@@ -172,6 +176,15 @@ export function Layout() {
             >
               <BookIcon size={20} />
             </Link>
+            <Link
+              to="/vocabulary"
+              aria-label="Vocabulary"
+              className={`rounded-full p-2 transition hover:bg-surface-2 hover:text-fg ${
+                pathname === "/vocabulary" ? "bg-surface-2 text-fg" : "text-muted"
+              }`}
+            >
+              <SparklesIcon size={20} />
+            </Link>
             <button
               type="button"
               onClick={toggle}
@@ -213,7 +226,7 @@ export function Layout() {
         <main className="mx-auto w-full max-w-[1180px] px-4 pb-44 pt-6 sm:px-6 md:px-10 md:pt-10">
           <Outlet />
           <footer className="mt-16 flex flex-col items-start justify-between gap-2 border-t border-line pt-5 text-[0.68rem] text-muted sm:flex-row sm:items-center">
-            <span>Podcast Language Studio · Phase 3</span>
+            <span>Podcast Language Studio · Phase 4</span>
             <span>Local data. No accounts. No tracking.</span>
           </footer>
         </main>

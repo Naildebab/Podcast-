@@ -1,11 +1,17 @@
+import fs from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
+import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { type Db, openDb } from "../src/db.js";
+import { closeDictionary } from "../src/dictionary.js";
 import type { FetchedText, FetchText } from "../src/http.js";
 import { addPodcast } from "../src/library.js";
 import { parseFeed } from "../src/rss.js";
+import { createTestDictionary } from "./dictionary-fixture.js";
 import { SAMPLE_RSS, SAMPLE_RSS_WITH_THIRD, SAMPLE_SITE } from "./fixtures.js";
 
 const SAMPLE_VTT = `WEBVTT
@@ -21,6 +27,8 @@ let db: Db;
 let server: Server;
 let base: string;
 let pages: Map<string, FetchedText>;
+let dictionaryDir: string;
+let dictionaryDb: Database.Database;
 
 async function listen(app: ReturnType<typeof createApp>): Promise<Server> {
   return new Promise((resolve, reject) => {
@@ -46,6 +54,9 @@ async function api(
 
 beforeEach(async () => {
   db = openDb(":memory:");
+  dictionaryDir = fs.mkdtempSync(path.join(os.tmpdir(), "pls-api-dictionary-"));
+  process.env.PODCAST_DICTIONARY_DB = path.join(dictionaryDir, "dictionary.db");
+  dictionaryDb = createTestDictionary(process.env.PODCAST_DICTIONARY_DB);
   pages = new Map([
     [
       "https://example.com/feed.xml",
@@ -103,13 +114,17 @@ beforeEach(async () => {
 afterEach(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   db.close();
+  closeDictionary();
+  dictionaryDb.close();
+  delete process.env.PODCAST_DICTIONARY_DB;
+  fs.rmSync(dictionaryDir, { recursive: true, force: true });
 });
 
 describe("health and metadata", () => {
   it("reports that the local server is ready", async () => {
     const response = await api("/api/health");
     expect(response.status).toBe(200);
-    expect(response.body).toMatchObject({ ok: true, phase: 3 });
+    expect(response.body).toMatchObject({ ok: true, phase: 4 });
   });
 });
 
@@ -335,6 +350,129 @@ describe("library and episodes", () => {
         })
       ).status,
     ).toBe(400);
+  });
+});
+
+describe("dictionary and vocabulary", () => {
+  it("reads the borrowed dictionary and reports its attribution", async () => {
+    const lookup = await api("/api/dictionary/lookup?word=podcast");
+    expect(lookup.status).toBe(200);
+    expect(lookup.body).toMatchObject({
+      normalized: "podcast",
+      matchedBy: "word",
+    });
+    expect(lookup.body.entries[0]).toMatchObject({
+      word: "podcast",
+      pos: "noun",
+      ipa: "/ˈpɑdˌkæst/",
+      definitions: ["A program delivered over the Internet."],
+      arabic: ["بُودْكَاسْت"],
+    });
+
+    const resources = await api("/api/resources");
+    expect(resources.body.dictionary).toMatchObject({
+      available: true,
+      entries: 3,
+      forms: 6,
+    });
+  });
+
+  it("saves, lists, updates, and deletes words with transcript context", async () => {
+    const added = await api("/api/podcasts", {
+      method: "POST",
+      body: JSON.stringify({ feedUrl: "https://example.com/feed.xml" }),
+    });
+    const episodes = await api(`/api/episodes?podcastId=${added.body.podcast.id}`);
+    const episode = episodes.body.episodes.find(
+      (item: { title: string }) => item.title === "Episode One & Friends",
+    );
+
+    const saved = await api("/api/vocabulary", {
+      method: "POST",
+      body: JSON.stringify({
+        word: "Podcast!",
+        entryId: 1,
+        episodeId: episode.id,
+        cueIndex: 2,
+        startMs: 4000,
+        context: "This podcast is about testing.",
+      }),
+    });
+    expect(saved.status).toBe(201);
+    expect(saved.body.word).toMatchObject({
+      word: "Podcast!",
+      normalizedWord: "podcast",
+      pos: "noun",
+      ipa: "/ˈpɑdˌkæst/",
+      definitions: ["A program delivered over the Internet."],
+      arabic: ["بُودْكَاسْت"],
+      episodeId: episode.id,
+      episodeTitle: "Episode One & Friends",
+      podcastTitle: "Test English Show",
+      cueIndex: 2,
+      startMs: 4000,
+      status: "learning",
+    });
+
+    const again = await api("/api/vocabulary", {
+      method: "POST",
+      body: JSON.stringify({
+        word: "podcast",
+        entryId: 1,
+        episodeId: episode.id,
+        cueIndex: 2,
+        context: "Updated context.",
+      }),
+    });
+    expect(again.status).toBe(200);
+    expect(again.body.word.id).toBe(saved.body.word.id);
+    expect(again.body.word.context).toBe("Updated context.");
+
+    const updated = await api(`/api/vocabulary/${saved.body.word.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "known", notes: "Test note." }),
+    });
+    expect(updated.status).toBe(200);
+    expect(updated.body.word).toMatchObject({ status: "known", notes: "Test note." });
+
+    const listed = await api("/api/vocabulary?status=known&q=podcast");
+    expect(listed.status).toBe(200);
+    expect(listed.body.total).toBe(1);
+    expect(listed.body.words[0].id).toBe(saved.body.word.id);
+
+    const removed = await api(`/api/vocabulary/${saved.body.word.id}`, {
+      method: "DELETE",
+    });
+    expect(removed.status).toBe(204);
+    expect((await api("/api/vocabulary")).body.total).toBe(0);
+  });
+
+  it("validates vocabulary input and missing resources", async () => {
+    expect(
+      (
+        await api("/api/vocabulary", {
+          method: "POST",
+          body: JSON.stringify({ word: "" }),
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await api("/api/vocabulary", {
+          method: "POST",
+          body: JSON.stringify({ word: "podcast", entryId: 999 }),
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await api("/api/vocabulary", {
+          method: "POST",
+          body: JSON.stringify({ word: "podcast", episodeId: 999 }),
+        })
+      ).status,
+    ).toBe(404);
+    expect((await api("/api/vocabulary/999", { method: "DELETE" })).status).toBe(404);
   });
 });
 

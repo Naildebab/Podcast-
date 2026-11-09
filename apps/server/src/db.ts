@@ -103,6 +103,32 @@ const MIGRATIONS: string[] = [
   DROP TABLE transcripts;
   ALTER TABLE transcripts_v3 RENAME TO transcripts;
   `,
+  `
+  CREATE TABLE vocabulary (
+    id INTEGER PRIMARY KEY,
+    word TEXT NOT NULL,
+    normalized_word TEXT NOT NULL,
+    lemma TEXT,
+    pos TEXT,
+    ipa TEXT,
+    definitions TEXT NOT NULL DEFAULT '[]',
+    arabic TEXT NOT NULL DEFAULT '[]',
+    context TEXT,
+    episode_id INTEGER REFERENCES episodes(id) ON DELETE SET NULL,
+    cue_index INTEGER,
+    start_ms INTEGER,
+    status TEXT NOT NULL DEFAULT 'learning'
+      CHECK (status IN ('new', 'learning', 'known')),
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE UNIQUE INDEX idx_vocabulary_source
+    ON vocabulary(normalized_word, episode_id, cue_index);
+  CREATE INDEX idx_vocabulary_updated
+    ON vocabulary(updated_at DESC);
+  `,
 ];
 
 export function migrate(db: Db): void {

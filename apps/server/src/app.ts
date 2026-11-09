@@ -38,6 +38,13 @@ import {
   type TranscriptOrigin,
 } from "./transcripts.js";
 import {
+  deleteVocabulary,
+  listVocabulary,
+  saveVocabulary,
+  updateVocabulary,
+  VocabularyInputError,
+} from "./vocabulary.js";
+import {
   cancelTranscription,
   getTranscriptionJob,
   startTranscription,
@@ -99,6 +106,34 @@ const transcriptImportSchema = z.object({
   format: transcriptFormatSchema.optional(),
   language: z.string().trim().max(20).optional(),
 });
+
+const vocabularyStatusSchema = z.enum(["new", "learning", "known"]);
+
+const vocabularyQuerySchema = z.object({
+  q: z.string().trim().max(200).optional(),
+  status: vocabularyStatusSchema.optional(),
+  episodeId: z.coerce.number().int().positive().optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(100),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+const vocabularySaveSchema = z.object({
+  word: z.string().trim().min(1, "Choose a word to save.").max(120),
+  entryId: z.number().int().positive().optional(),
+  episodeId: z.number().int().positive().optional(),
+  cueIndex: z.number().int().min(0).max(1_000_000).optional(),
+  startMs: z.number().int().min(0).max(12 * 60 * 60 * 1000).optional(),
+  context: z.string().trim().max(4000).optional(),
+});
+
+const vocabularyPatchSchema = z
+  .object({
+    status: vocabularyStatusSchema.optional(),
+    notes: z.string().max(4000).optional(),
+  })
+  .refine((value) => value.status !== undefined || value.notes !== undefined, {
+    message: "Send a status or notes to update.",
+  });
 
 const TRANSCRIPT_MAX_BYTES = 4 * 1024 * 1024;
 const TRANSCRIPT_ACCEPT =
@@ -178,7 +213,7 @@ function saveTranscriptOrThrow(
 function parseId(raw: string): number {
   const id = Number(raw);
   if (!Number.isInteger(id) || id <= 0) {
-    throw new HttpError(400, "That episode or podcast id is not valid.");
+    throw new HttpError(400, "That id is not valid.");
   }
   return id;
 }
@@ -203,13 +238,13 @@ export function createApp(db: Db, options: AppOptions = {}): express.Express {
   app.use(express.json({ limit: "6mb" }));
 
   app.get("/api/health", (_req, res) => {
-    res.json({ ok: true, version: "0.3.0", phase: 3 });
+    res.json({ ok: true, version: "0.4.0", phase: 4 });
   });
 
   app.get("/api/meta", (_req, res) => {
     res.json({
-      version: "0.3.0",
-      phase: 3,
+      version: "0.4.0",
+      phase: 4,
       dataDir: dataDir(),
       stats: getStats(db),
     });
@@ -235,6 +270,46 @@ export function createApp(db: Db, options: AppOptions = {}): express.Express {
       }
       throw error;
     }
+  });
+
+  // --- Vocabulary ---------------------------------------------------------
+
+  app.get("/api/vocabulary", (req, res) => {
+    const query = vocabularyQuerySchema.parse(req.query);
+    res.json(listVocabulary(db, query));
+  });
+
+  app.post("/api/vocabulary", (req, res) => {
+    const body = vocabularySaveSchema.parse(req.body);
+    if (body.episodeId !== undefined && !getEpisode(db, body.episodeId)) {
+      throw new HttpError(404, "That episode could not be found.");
+    }
+
+    try {
+      const saved = saveVocabulary(db, body);
+      res.status(saved.created ? 201 : 200).json({ word: saved.word });
+    } catch (error) {
+      if (error instanceof VocabularyInputError || error instanceof DictionaryQueryError) {
+        throw new HttpError(400, error.message);
+      }
+      if (error instanceof DictionaryUnavailableError) {
+        throw new HttpError(503, error.message);
+      }
+      throw error;
+    }
+  });
+
+  app.patch("/api/vocabulary/:id", (req, res) => {
+    const body = vocabularyPatchSchema.parse(req.body);
+    const word = updateVocabulary(db, parseId(req.params.id), body);
+    if (!word) throw new HttpError(404, "That saved word could not be found.");
+    res.json({ word });
+  });
+
+  app.delete("/api/vocabulary/:id", (req, res) => {
+    const removed = deleteVocabulary(db, parseId(req.params.id));
+    if (!removed) throw new HttpError(404, "That saved word could not be found.");
+    res.status(204).end();
   });
 
   // --- API-free discovery -------------------------------------------------

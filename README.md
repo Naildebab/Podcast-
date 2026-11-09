@@ -1,19 +1,20 @@
 # Podcast Language Studio
 
-A local-first podcast player for language learners. Phase 3 gives you a real listening
-foundation, transcripts, a local Wiktionary dictionary, and local Whisper transcription:
-import public RSS feeds, browse a hand-checked catalog, preview shows before adding them,
-play episodes in a persistent player, read along with publisher or imported transcripts,
-look up words without a dictionary service, and transcribe an episode on your own CPU.
+A local-first podcast player for language learners. Phase 4 adds click-to-translate and a
+vocabulary list on top of the listening foundation, transcripts, local Wiktionary
+dictionary, and local Whisper transcription: import public RSS feeds, browse a hand-checked
+catalog, play episodes in a persistent player, read along with publisher or imported
+transcripts, click any word for its definition and Arabic translation, save words with
+their source context, and transcribe an episode on your own CPU.
 
-No account. No API keys. No analytics. Your library, listening positions, and transcripts
-live in a SQLite file on your own computer; small display and playback preferences stay in
-browser local storage. The dictionary and Whisper installation are reused from their
-existing locations rather than copied into this project.
+No account. No API keys. No analytics. Your library, listening positions, transcripts,
+and vocabulary live in a SQLite file on your own computer; small display and playback
+preferences stay in browser local storage. The dictionary and Whisper installation are
+reused from their existing locations rather than copied into this project.
 
-> Status: **Phase 3 — local language tools**. Vocabulary, shadowing, and Android are
-> planned for later phases. Labels in the interface say “Soon” when a feature is not built
-> yet.
+> Status: **Phase 4 — vocabulary and click-to-translate**. Shadowing, spaced repetition,
+> and Android are planned for later phases. Labels in the interface say “Soon” when a
+> feature is not built yet.
 
 ## What works
 
@@ -37,6 +38,15 @@ existing locations rather than copied into this project.
   SubRip, Podcasting 2.0 JSON, or plain-text file. Timed transcripts highlight the current
   line, scroll with playback, and let you click a timestamp to seek. Untimed text is kept
   as a reading view. Transcripts are stored locally and fetched only when you ask.
+- **Click-to-translate** — click any word in a transcript to pause the audio and open a
+  translation panel with the English definition, word type, IPA, Arabic translation, and
+  the sentence where you found it. Clicking another word updates the panel without
+  restarting playback. Closing the panel resumes the exact paused position only if the
+  podcast was playing before the first word was clicked.
+- **Vocabulary** — save words from the translation panel or the Dictionary page. Each
+  entry keeps its dictionary data, source episode, timestamp, context sentence, note, and
+  a simple New / Learning / Known status. The Vocabulary page supports search, filtering,
+  editing notes, and removal.
 - **Local dictionary** — search the existing Wiktionary SQLite database for definitions,
   IPA, Arabic translations, and available word forms. It is opened read-only; no lookup
   leaves the computer.
@@ -76,6 +86,32 @@ or remove the local copy.
 
 The importer accepts pasted text or a file up to 4 MB. Publisher HTML transcript pages are
 not scraped; the app explains that limitation and keeps the manual import path available.
+
+## Click-to-translate and vocabulary
+
+Words in a transcript are marked with a dotted underline. Clicking one:
+
+1. pauses the current audio immediately;
+2. looks up the word in the local dictionary;
+3. opens a non-modal panel with definitions, word type, IPA, Arabic translations, and the
+   transcript sentence as the example context.
+
+The panel is intentionally non-modal so you can click another word while it is open. A
+playback lock in the global player blocks play, seeking, media-session playback/seek, and
+keyboard controls until the panel closes. The lock records whether audio was actually
+playing before the first word click:
+
+- If it was playing, closing with the X, Escape, or a click outside the panel resumes the
+  same audio element from the exact paused timestamp.
+- If it was already paused, closing leaves it paused.
+- Clicking another word while the panel is open only updates the translation; it does not
+  change the resume decision and never restarts the episode.
+
+The panel’s “Save word” button stores the word with its dictionary entry, episode id,
+timestamp, and context sentence. You can also save dictionary entries directly from the
+Dictionary page. Saved words appear on the Vocabulary page, where you can search, filter
+by status, write a note, and delete entries. Vocabulary is stored in this app’s SQLite
+database, not in the borrowed Wiktionary file.
 
 ## Existing local language tools
 
@@ -130,12 +166,13 @@ one is missing.
 
 ## Not built yet
 
-These are honest Phase 3 boundaries, not hidden buttons:
+These are honest Phase 4 boundaries, not hidden buttons:
 
 - Automatic transcription on episode open (transcription is always explicit)
 - Cloud transcription, translation, or dictionary APIs
 - Scraping arbitrary HTML transcript pages (paste the text instead)
-- Vocabulary collection and study sheets (Phase 4)
+- Spaced-repetition scheduling and generated study sheets (the Vocabulary page is a
+  simple status list, not an SRS system)
 - Shadowing and local recording (Phase 5)
 - OPML import/export
 - Offline audio downloads (temporary transcription audio is deleted)
@@ -215,6 +252,8 @@ PODCAST_STUDIO_DATA=/path/to/podcast-data npm start
 - Transcripts are stored in the same database as parsed cues. Removing a podcast or
   episode removes its transcript; removing a transcript does not affect the audio or your
   progress.
+- Vocabulary entries and their notes are stored in the same database. Deleting a podcast
+  keeps the saved word and definition but clears its link to the removed episode.
 - Cover images and audio load directly from the publisher in your browser, so the
   publisher can see your IP address just as it would with any podcast app.
 - The server binds to `127.0.0.1` by default and is not exposed to your local network.
@@ -273,6 +312,7 @@ instead of pretending to search it. OPML import is planned.
 │   │   │   ├── transcript.ts  VTT/SRT/JSON/plain-text parsing
 │   │   │   ├── transcripts.ts Transcript and cue storage queries
 │   │   │   ├── dictionary.ts Read-only Wiktionary database queries
+│   │   │   ├── vocabulary.ts Saved words, dictionary enrichment, and notes
 │   │   │   ├── whisper.ts   Local Whisper job manager and VTT import
 │   │   │   ├── http.ts     SSRF-safe fetch and temporary audio downloads
 │   │   │   ├── discovery.ts Website/feed resolution and previews
@@ -281,8 +321,8 @@ instead of pretending to search it. OPML import is planned.
 │   │   └── test/           Vitest unit and API tests
 │   └── web/               React 19 + TypeScript + Vite + Tailwind 4
 │       └── src/
-│           ├── pages/      Home, Discover, Library, Episodes, Episode, Dictionary, Settings
-│           ├── components/ Layout, player, cards, dialogs, pagination
+│           ├── pages/      Home, Discover, Library, Episodes, Episode, Dictionary, Vocabulary, Settings
+│           ├── components/ Layout, player, transcript, translation panel, cards, dialogs
 │           ├── player/     Global audio state and progress saving
 │           └── theme/      Light/dark/system handling
 ├── catalog/podcasts.json  Hand-checked starter feeds
@@ -299,6 +339,10 @@ All routes are under `/api`.
 | GET    | `/meta`                      | Version, data directory, library stats     |
 | GET    | `/resources`                 | Local Whisper and dictionary status        |
 | GET    | `/dictionary/lookup?word=...`| Read-only dictionary lookup                 |
+| GET    | `/vocabulary`                | List/search saved words                    |
+| POST   | `/vocabulary`                | Save a word with optional source context   |
+| PATCH  | `/vocabulary/:id`            | Update status or notes                     |
+| DELETE | `/vocabulary/:id`            | Remove a saved word                        |
 | GET    | `/discovery/catalog`         | Search/filter the curated catalog          |
 | POST   | `/discovery/resolve`         | Resolve a feed or website and preview it   |
 | GET    | `/podcasts`                  | List saved podcasts                        |
@@ -342,6 +386,8 @@ The server suite covers:
 - Private/loopback address rejection, redirect re-validation, and fetch size limits
 - Dictionary direct lookups, lemma/form lookups, JSON fields, attribution, and missing DBs
   using a temporary fixture database
+- Vocabulary save/deduplicate/list/filter/search/update/delete behavior, dictionary
+  enrichment, source context, and API error cases
 
 The tests use fixtures and an injected fetch function, so they do not need the network.
 Manual QA should still try a real feed with transcripts, such as
@@ -353,6 +399,13 @@ available. Look up `podcast`, `language`, and `running` in the Dictionary page, 
 transcribe a short episode from the transcript panel. The actual verification used a
 three-minute Podnews episode; Whisper `base.en` produced 40 timestamped cues, which were
 saved with origin `whisper`, and the temporary audio folder was removed.
+
+For click-to-translate, play an episode with a loaded transcript and check all playback
+cases: playing → click a word pauses; panel stays open while paused; clicking another word
+updates the translation without resuming; X, Escape, and outside-click close it and resume
+only when appropriate. Then repeat from an initially paused player and confirm closing
+still leaves it paused. Save a word from the panel and from Dictionary, confirm it appears
+on Vocabulary, change its status, save a note, then delete it.
 
 ## Design notes
 
@@ -372,9 +425,11 @@ playback progress is saved, and how transcripts are fetched, parsed, and stored.
   click-to-seek, search, and local transcript storage.
 - **Phase 3 (done)** — read-only Wiktionary dictionary lookups and explicit local Whisper
   transcription using the resources already on this computer.
-- **Phase 4** — vocabulary collection and study sheets.
+- **Phase 4 (done)** — click-to-translate with reliable pause/resume, vocabulary capture,
+  source context, notes, and status filters.
 - **Phase 5** — shadowing loops and local recording.
-- **Later** — OPML import/export, offline audio, Android client.
+- **Later** — spaced-repetition scheduling, OPML import/export, offline audio, Android
+  client.
 
 ## Independence
 

@@ -10,6 +10,7 @@ import { Library } from "./pages/Library";
 import { NotFound } from "./pages/NotFound";
 import { PodcastDetail } from "./pages/PodcastDetail";
 import { Settings } from "./pages/Settings";
+import { Vocabulary } from "./pages/Vocabulary";
 
 export default function App() {
   return (
@@ -23,6 +24,7 @@ export default function App() {
           <Route path="episodes" element={<Episodes />} />
           <Route path="episodes/:id" element={<EpisodePage />} />
           <Route path="dictionary" element={<Dictionary />} />
+          <Route path="vocabulary" element={<Vocabulary />} />
           <Route path="settings" element={<Settings />} />
           <Route path="*" element={<NotFound />} />
         </Route>

@@ -5,6 +5,7 @@ import {
   useState,
   type ChangeEvent,
   type FormEvent,
+  type ReactNode,
 } from "react";
 import { api } from "../lib/api";
 import { formatDate, formatTime } from "../lib/format";
@@ -30,6 +31,10 @@ import {
   SearchIcon,
   TrashIcon,
 } from "./Icons";
+import {
+  WordTranslationPanel,
+  type TranslationSelection,
+} from "./WordTranslationPanel";
 
 const FORMAT_LABELS: Record<TranscriptFormat, string> = {
   vtt: "WebVTT",
@@ -109,6 +114,74 @@ function HighlightedText({ text, query }: { text: string; query: string }) {
       )}
     </>
   );
+}
+
+const WORD_PATTERN = /[\p{L}\p{M}][\p{L}\p{M}'’\-]*/gu;
+
+function TranscriptText({
+  cue,
+  query,
+  selection,
+  onWordClick,
+}: {
+  cue: TranscriptCue;
+  query: string;
+  selection: TranslationSelection | null;
+  onWordClick: (word: string, cue: TranscriptCue, tokenIndex: number) => void;
+}) {
+  const nodes: ReactNode[] = [];
+  let lastIndex = 0;
+  let tokenIndex = 0;
+
+  for (const match of cue.text.matchAll(WORD_PATTERN)) {
+    const start = match.index ?? 0;
+    if (start > lastIndex) {
+      nodes.push(
+        <HighlightedText
+          key={`text-${lastIndex}`}
+          text={cue.text.slice(lastIndex, start)}
+          query={query}
+        />,
+      );
+    }
+
+    const word = match[0];
+    const currentTokenIndex = tokenIndex;
+    const selected =
+      selection?.cueIndex === cue.index && selection.tokenIndex === currentTokenIndex;
+    nodes.push(
+      <span
+        key={`word-${start}`}
+        data-translate-word=""
+        role="button"
+        tabIndex={-1}
+        title={`Translate “${word}”`}
+        onClick={(event) => {
+          event.stopPropagation();
+          onWordClick(word, cue, currentTokenIndex);
+        }}
+        className={`cursor-pointer rounded-[3px] underline decoration-dotted decoration-line underline-offset-2 transition hover:bg-accent-soft hover:text-fg hover:decoration-accent ${
+          selected ? "bg-amber/30 text-fg decoration-amber" : ""
+        }`}
+      >
+        <HighlightedText text={word} query={query} />
+      </span>,
+    );
+    tokenIndex += 1;
+    lastIndex = start + word.length;
+  }
+
+  if (lastIndex < cue.text.length) {
+    nodes.push(
+      <HighlightedText
+        key={`text-${lastIndex}`}
+        text={cue.text.slice(lastIndex)}
+        query={query}
+      />,
+    );
+  }
+
+  return <>{nodes}</>;
 }
 
 export function TranscriptPanel({ episode }: { episode: Episode }) {
@@ -354,7 +427,7 @@ export function TranscriptPanel({ episode }: { episode: Episode }) {
         />
       ) : transcript ? (
         <TranscriptReader
-          key={transcript.importedAt}
+          key={`${episode.id}:${transcript.importedAt}`}
           transcript={transcript}
           episode={episode}
           busy={busy}
@@ -564,9 +637,46 @@ function TranscriptReader({
   const actions = usePlayerActions();
   const [query, setQuery] = useState("");
   const [follow, setFollow] = useState(true);
+  const [selection, setSelection] = useState<TranslationSelection | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const panelOpenRef = useRef(false);
+  const resumeOnCloseRef = useRef(false);
 
   const isCurrent = player.episode?.id === episode.id;
+
+  function openTranslation(word: string, cue: TranscriptCue, tokenIndex: number) {
+    if (!panelOpenRef.current) {
+      panelOpenRef.current = true;
+      resumeOnCloseRef.current = actions.beginTranslationMode();
+    } else {
+      actions.pause();
+    }
+    setSelection({
+      word,
+      cueIndex: cue.index,
+      tokenIndex,
+      startMs: cue.startMs,
+      context: cue.text,
+    });
+  }
+
+  function closeTranslation() {
+    if (!panelOpenRef.current) return;
+    panelOpenRef.current = false;
+    const resume = resumeOnCloseRef.current;
+    resumeOnCloseRef.current = false;
+    setSelection(null);
+    actions.endTranslationMode(resume);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (!panelOpenRef.current) return;
+      panelOpenRef.current = false;
+      resumeOnCloseRef.current = false;
+      actions.endTranslationMode(false);
+    };
+  }, [actions]);
   const activeIndex = useMemo(
     () =>
       transcript.timed && isCurrent
@@ -701,7 +811,8 @@ function TranscriptReader({
 
       {transcript.timed ? (
         <p className="mt-2 text-[0.65rem] text-muted">
-          Click a timestamp to play from that line.{" "}
+          Click a timestamp to play from that line. Click any word for its definition and
+          Arabic translation.{" "}
           {isCurrent ? (
             <>The current line follows the audio.</>
           ) : (
@@ -710,7 +821,8 @@ function TranscriptReader({
         </p>
       ) : (
         <p className="mt-2 text-[0.65rem] text-muted">
-          This transcript has no timestamps, so it is a reading view only.
+          This transcript has no timestamps, but you can still click any word for its
+          definition and Arabic translation.
         </p>
       )}
 
@@ -726,37 +838,61 @@ function TranscriptReader({
           {filtered.map((cue) => {
             const active = cue.index === activeIndex;
             return (
-              <button
+              <div
                 key={cue.index}
-                type="button"
                 data-cue-index={cue.index}
-                onClick={() => seekTo(cue)}
-                disabled={cue.startMs === null}
+                onClick={cue.startMs === null ? undefined : () => seekTo(cue)}
                 aria-current={active ? "true" : undefined}
                 className={`group flex w-full items-start gap-3 rounded-xl px-2.5 py-2 text-left transition ${
                   active
                     ? "bg-accent-soft text-fg ring-1 ring-accent/20"
                     : "text-muted hover:bg-surface-2 hover:text-fg"
-                } ${cue.startMs === null ? "cursor-default" : ""}`}
+                } ${cue.startMs === null ? "cursor-default" : "cursor-pointer"}`}
               >
-                <span
-                  className={`w-12 shrink-0 pt-0.5 text-right font-mono text-[0.65rem] tabular-nums ${
-                    active ? "font-bold text-accent-strong" : "text-muted"
-                  }`}
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    seekTo(cue);
+                  }}
+                  disabled={cue.startMs === null}
+                  aria-label={
+                    cue.startMs === null
+                      ? "This line has no timestamp"
+                      : `Play from ${formatTime(cue.startMs / 1000)}`
+                  }
+                  className={`w-12 shrink-0 pt-0.5 text-right font-mono text-[0.65rem] tabular-nums transition ${
+                    active
+                      ? "font-bold text-accent-strong"
+                      : "text-muted hover:text-pine"
+                  } disabled:cursor-default disabled:hover:text-muted`}
                 >
                   {cue.startMs === null ? "—" : formatTime(cue.startMs / 1000)}
-                </span>
+                </button>
                 <span className="min-w-0 text-sm leading-relaxed">
                   {cue.speaker ? (
                     <span className="mr-1 font-semibold text-pine">{cue.speaker}:</span>
                   ) : null}
-                  <HighlightedText text={cue.text} query={query} />
+                  <TranscriptText
+                    cue={cue}
+                    query={query}
+                    selection={selection}
+                    onWordClick={openTranslation}
+                  />
                 </span>
-              </button>
+              </div>
             );
           })}
         </div>
       )}
+
+      {selection ? (
+        <WordTranslationPanel
+          selection={selection}
+          episode={episode}
+          onClose={closeTranslation}
+        />
+      ) : null}
     </div>
   );
 }

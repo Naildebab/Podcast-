@@ -1,7 +1,13 @@
 import { useState, type FormEvent } from "react";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
-import { BookIcon, ExternalIcon, SearchIcon } from "../components/Icons";
+import {
+  BookIcon,
+  CheckIcon,
+  ExternalIcon,
+  PlusIcon,
+  SearchIcon,
+} from "../components/Icons";
 import { Notice, Skeleton } from "../components/Notice";
 import { api } from "../lib/api";
 import { useAsync, useDocumentTitle } from "../lib/hooks";
@@ -143,6 +149,24 @@ export function Dictionary() {
 function DictionaryResultView({ result }: { result: DictionaryResult }) {
   const forms = result.forms.slice(0, 80);
   const extraForms = result.forms.length - forms.length;
+  const [savingId, setSavingId] = useState<number | null>(null);
+  const [savedIds, setSavedIds] = useState<Set<number>>(() => new Set());
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  async function saveEntry(entryId: number, word: string) {
+    setSavingId(entryId);
+    setSaveError(null);
+    try {
+      await api.saveVocabulary({ word, entryId });
+      setSavedIds((previous) => new Set(previous).add(entryId));
+    } catch (caught) {
+      setSaveError(
+        caught instanceof Error ? caught.message : "The word could not be saved.",
+      );
+    } finally {
+      setSavingId(null);
+    }
+  }
 
   return (
     <section className="animate-rise rounded-3xl border border-line bg-surface p-5 sm:p-6">
@@ -166,6 +190,12 @@ function DictionaryResultView({ result }: { result: DictionaryResult }) {
         </div>
       </div>
 
+      {saveError ? (
+        <Notice tone="error" className="mt-4">
+          {saveError}
+        </Notice>
+      ) : null}
+
       {result.entries.length === 0 ? (
         <Notice className="mt-4">
           No entry was found for “{result.query}”. Try the base form of the word or a different
@@ -184,9 +214,26 @@ function DictionaryResultView({ result }: { result: DictionaryResult }) {
                 {entry.lemma ? (
                   <span className="text-[0.65rem] text-muted">form of {entry.lemma}</span>
                 ) : null}
-                {entry.ipa ? (
-                  <span className="ml-auto font-mono text-xs text-pine">{entry.ipa}</span>
-                ) : null}
+                <div className="ml-auto flex items-center gap-2">
+                  {entry.ipa ? (
+                    <span className="font-mono text-xs text-pine">{entry.ipa}</span>
+                  ) : null}
+                  {savedIds.has(entry.id) ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-pine/10 px-2.5 py-1 text-[0.62rem] font-bold uppercase tracking-[0.12em] text-pine">
+                      <CheckIcon size={12} /> Saved
+                    </span>
+                  ) : (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void saveEntry(entry.id, entry.word)}
+                      loading={savingId === entry.id}
+                      disabled={savingId !== null && savingId !== entry.id}
+                    >
+                      <PlusIcon size={13} /> Save
+                    </Button>
+                  )}
+                </div>
               </div>
 
               {entry.definitions.length > 0 ? (

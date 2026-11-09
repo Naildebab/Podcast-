@@ -1,6 +1,6 @@
 # Development notes
 
-This document records the architecture and the decisions behind Phase 3. It is meant for
+This document records the architecture and the decisions behind Phase 4. It is meant for
 whoever maintains the project next — including future me.
 
 ## Stack
@@ -88,6 +88,19 @@ borrowed, read-only dictionary database; no other file there is read or written.
 - one row per episode: `position_ms`, `status` (`new`, `in_progress`, `completed`),
   `updated_at`
 - cascade delete when an episode or podcast is removed
+
+`vocabulary`
+
+- one row per saved word/source pair: display word, normalized word, lemma, part of speech,
+  IPA, JSON definition and Arabic arrays, context sentence, optional episode/cue/timestamp,
+  status (`new`, `learning`, `known`), notes, and timestamps
+- a unique index on `(normalized_word, episode_id, cue_index)` prevents saving the same
+  word from the same transcript line twice while still allowing the same word from
+  different episodes or lines; SQLite treats null episode/cue pairs as distinct, and the
+  service checks for an existing unsourced save before inserting
+- `episode_id` uses `ON DELETE SET NULL`, so deleting a podcast keeps the word and its
+  definition but clears the broken source link; nullable unique columns avoid a collision
+  when several saved words lose their episode at once
 
 `settings`
 
@@ -192,6 +205,43 @@ it.
 The real database has 1,165,874 entries and 579,157 forms and uses `journal_mode=delete`.
 Read-only access works without changing the source file or creating a second copy.
 
+## Vocabulary and click-to-translate
+
+`apps/server/src/vocabulary.ts` owns saved-word persistence. A save request carries the
+clicked word, optional dictionary entry id, episode/cue/timestamp, and context sentence.
+The service re-runs the local dictionary lookup on the server rather than trusting a
+client-supplied definition. It stores the selected entry (or the first entry) and caps the
+stored definition/Arabic arrays at 12 items. If the dictionary is unavailable, the request
+returns 503; if an entry id no longer exists, it returns 400.
+
+The unique source index makes saves idempotent per word and transcript line. A repeat save
+updates the dictionary snapshot and context but preserves the learner’s status and notes.
+`GET /api/vocabulary` supports text search across the word, lemma, definitions, Arabic,
+notes, and context, plus status and episode filters. `PATCH` updates status/notes and
+`DELETE` removes a word.
+
+On the client, `TranscriptPanel.tsx` tokenizes each cue with a Unicode letter pattern.
+Word spans carry `data-translate-word`, stop click propagation so they do not seek, and
+show a dotted underline. Clicking a word calls `openTranslation`, which:
+
+1. opens the panel on the first click and asks the player to enter translation mode;
+2. stores whether audio was really playing (`!audio.paused && !audio.ended`);
+3. pauses through the single player instance;
+4. updates only the selection on later word clicks.
+
+`PlayerContext.tsx` keeps a `translationLockRef`. `toggle`, `play`, `playAt`, `loadAndPlay`,
+`seek`/`skip`, the global keyboard handler, Media Session play/seek, and the audio `play`
+event all respect the lock. `endTranslationMode(resume)` unlocks and, only when the caller
+recorded that audio was playing, calls `audio.play()` without resetting `currentTime`.
+Closing via X, Escape, or outside click all route through the same `closeTranslation`
+function. Unmounting the transcript releases the lock without resuming.
+
+The panel is a portal-rendered, non-modal card fixed above the player area. It is not a
+modal because clicking another word must remain possible. Its capture-phase click handler
+ignores clicks on `[data-translate-word]`. Using click rather than pointerdown also means a
+touch scroll does not close the panel or resume audio by accident. Dictionary requests are
+cancelled defensively with an `active` flag when the selected word changes.
+
 ## Local Whisper transcription
 
 `apps/server/src/whisper.ts` manages explicit, asynchronous jobs. It never starts when an
@@ -280,6 +330,10 @@ All responses are JSON except `204` deletes. Errors are `{ "error": "..." }`.
 | GET    | `/api/meta`                   | Data directory and stats                           |
 | GET    | `/api/resources`              | Local Whisper and dictionary availability          |
 | GET    | `/api/dictionary/lookup`      | `word`; read-only dictionary lookup                |
+| GET    | `/api/vocabulary`             | `q`, `status`, `episodeId`, pagination             |
+| POST   | `/api/vocabulary`             | Word plus optional `entryId`, episode, cue, context|
+| PATCH  | `/api/vocabulary/:id`         | `{ status?, notes? }`                              |
+| DELETE | `/api/vocabulary/:id`         | Remove a saved word                                |
 | GET    | `/api/discovery/catalog`      | `q`, `category`, `level`; returns `inLibrary`      |
 | POST   | `/api/discovery/resolve`      | `{ url }`; preview without saving                  |
 | GET    | `/api/podcasts`               | Saved podcasts                                     |
@@ -329,15 +383,23 @@ a JSON 404; non-API routes fall through to the SPA shell when static files are p
   - `playAt(episode, seconds)`, which starts a new episode at a transcript cue without
     racing metadata loading, or seeks and resumes the current episode
 - `components/TranscriptPanel.tsx` owns the local transcript request, import modal,
-  reload/remove controls, search, follow toggle, cue list, and local Whisper controls. It
-  checks `/transcription`, polls active jobs every two seconds, shows a cancellable
-  progress notice, and reloads the transcript when a job completes. It only subscribes to
-  player time inside the reader, computes the active cue with a binary search, and scrolls
-  the transcript container rather than the page. A missing end time keeps the cue active
-  until the next cue.
+  reload/remove controls, search, follow toggle, cue list, word tokenization, and local
+  Whisper controls. It checks `/transcription`, polls active jobs every two seconds, shows
+  a cancellable progress notice, and reloads the transcript when a job completes. It only
+  subscribes to player time inside the reader, computes the active cue with a binary
+  search, and scrolls the transcript container rather than the page. A missing end time
+  keeps the cue active until the next cue. Word clicks are handled by `openTranslation`,
+  which owns the panel open/resume refs independently of React render timing.
+- `components/WordTranslationPanel.tsx` is portal-rendered and non-modal. It fetches the
+  selected word from the local dictionary, renders definitions/type/IPA/Arabic/context,
+  and saves the word to vocabulary. Its outside-click listener ignores transcript word
+  clicks so another word can update the panel in place.
 - `pages/Dictionary.tsx` provides the search form, suggested words, per-entry definitions,
-  IPA, Arabic translations, forms, and source/license attribution. It reads only through
-  `lib/api.ts`; there is no client-side dictionary file.
+  IPA, Arabic translations, forms, source/license attribution, and per-entry save buttons.
+  It reads only through `lib/api.ts`; there is no client-side dictionary file.
+- `pages/Vocabulary.tsx` lists saved words with search, status filters, notes, episode
+  context links, status changes, and deletion. It uses the same vocabulary API as the
+  translation panel.
 - Settings uses the same `/api/resources` response as the Dictionary page to report missing
   resources, paths, counts, and environment variables.
 - The mini player hides itself on the page of the episode it is playing, so it does not
@@ -358,6 +420,10 @@ a JSON 404; non-API routes fall through to the SPA shell when static files are p
 - “Mark completed” pauses, seeks to 0, saves `completed`, and suppresses the pause handler
   for 150 ms so it cannot overwrite the status.
 - “Reset progress” saves `new` with position 0.
+- Translation mode is a playback lock, not a second player. The first word click records
+  whether `audio.paused` was false, pauses, and sets the lock. All playback entry points
+  are blocked while the lock is set. Closing unlocks; resuming uses `audio.play()` on the
+  existing element, preserving `currentTime`. It never calls `loadAndPlay`.
 - Audio failures are shown as an inline message; they never crash the page.
 
 ## Styling and theme
@@ -373,8 +439,10 @@ The layout is mobile-first. The desktop sidebar appears at `md` (768px); the epi
 switches to a two-column player/progress layout at `lg` (1024px). Mobile navigation uses
 short labels (“Library”, “Episodes”) so all four items fit at phone widths.
 
-Dictionary is now a real practice route. Vocabulary and shadowing remain disabled “Soon”
-items, not clickable placeholders.
+Dictionary and Vocabulary are now real practice routes. Shadowing remains a disabled
+“Soon” item, not a clickable placeholder. Clickable transcript words use a dotted
+underline and a selected-word amber highlight; the translation panel floats above the
+player on desktop and becomes a near-full-width bottom card on phones.
 
 ## Testing strategy
 
@@ -387,6 +455,8 @@ items, not clickable placeholders.
   load/cache/import/delete, HTML rejection, and error cases
 - `dictionary.test.ts` — direct lookup, form-to-lemma lookup, IPA/Arabic parsing, forms,
   attribution, empty queries, and a missing database, all against a temporary fixture DB
+- `vocabulary.test.ts` — dictionary enrichment, source deduplication, status/notes,
+  search/filter/list/delete, invalid entry ids, and a missing dictionary
 - `http.test.ts` — public/private address policy, manual redirects, size limits
 
 Tests inject a fake `fetchText`; they never depend on a live publisher. A temp SQLite
@@ -408,12 +478,18 @@ Manual checks after changes:
    paths. Temporarily point `PODCAST_DICTIONARY_DB` at a missing path to confirm the 503 and
    “Unavailable” state are graceful.
 8. Look up `podcast`, `running`, and `better` in Dictionary. Confirm definitions, IPA, forms,
-   Arabic where present, and the CC BY-SA attribution.
-9. Transcribe a short real episode, watch the job progress, cancel once, then run it again.
-   Confirm the saved transcript badge says “Local Whisper”, cues seek the player, and no
-   `podcast-plus-whisper-*` temp folder remains.
-10. Check the mini player across routes and the full player on the episode route.
-11. Check light/dark and a 390px-wide viewport.
+   Arabic where present, and the CC BY-SA attribution. Save an entry and confirm it appears
+   on Vocabulary.
+9. With a transcript loaded and audio playing, click words. Check: playing → click pauses;
+   another word updates without resuming; X/Escape/outside click resumes from the same
+   timestamp; initially paused → click and close remains paused. Save the word, then edit
+   status and notes on Vocabulary and delete it.
+10. Transcribe a short real episode, watch the job progress, cancel once, then run it again.
+    Confirm the saved transcript badge says “Local Whisper”, cues seek the player, and no
+    `podcast-plus-whisper-*` temp folder remains.
+11. Check the mini player across routes and the full player on the episode route.
+12. Check light/dark and a 390px-wide viewport, including the translation panel and
+    Vocabulary list.
 
 ## Common maintenance tasks
 
@@ -442,6 +518,12 @@ would break resume and duplicate sound. Update progress through the existing `pe
 helper so keepalive/page-hide behavior stays consistent. If you add a new seek entry point,
 use `playAt` rather than assigning `audio.currentTime` before metadata has loaded.
 
+Any new playback entry point (button, shortcut, media key, or integration) must respect
+`translationLockRef` while the word panel is open. Do not work around the lock by calling
+`audio.play()` directly; add the guard to the shared player action instead. Resume after
+translation must call the player’s `endTranslationMode` path rather than resetting the
+source, so the exact paused timestamp is preserved.
+
 ### Add a transcript format
 
 Add a parser in `transcript.ts`, extend `TranscriptFormat` and `transcriptFormatFrom`, and
@@ -449,13 +531,14 @@ make `detectTranscriptFormat` recognize the format. Normalize every parser throu
 `normalizeCues`, then add parser and API tests. The UI consumes the same cue shape, so no
 schema change is needed unless the format adds new metadata.
 
-## Deliberate non-goals in Phase 3
+## Deliberate non-goals in Phase 4
 
 - Automatic transcription when an episode page opens
 - Cloud transcription, translation, or dictionary APIs
 - Scraping arbitrary HTML transcript pages
 - Offline audio downloads (temporary transcription audio is deleted)
-- Vocabulary, shadowing, and recording
+- Spaced-repetition scheduling or generated study sheets
+- Shadowing and recording
 - Editing or adding dictionary entries
 - OPML import/export
 - Android

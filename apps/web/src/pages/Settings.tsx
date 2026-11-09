@@ -281,7 +281,8 @@ export function Settings() {
             {
               phase: "Phase 4",
               title: "Vocabulary",
-              body: "Select words, save definitions, and turn episodes into study sheets.",
+              body: "Click words in a transcript, pause for the definition and Arabic translation, then save words with their source context.",
+              done: true,
             },
             {
               phase: "Phase 5",
@@ -307,7 +308,7 @@ export function Settings() {
           ))}
         </div>
         <Notice className="mt-4">
-          Android is a later phase. Phase 3 is still a local web app; no mobile build has
+          Android is a later phase. Phase 4 remains a local web app; no mobile build has
           been started.
         </Notice>
       </section>

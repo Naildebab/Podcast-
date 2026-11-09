@@ -10,10 +10,14 @@ import type {
   ProgressStatus,
   ResolveResponse,
   ResourcesResponse,
+  SaveVocabularyInput,
   Transcript,
   TranscriptFormat,
   TranscriptionJob,
   TranscriptionStatus,
+  VocabularyItem,
+  VocabularyListResponse,
+  VocabularyStatus,
 } from "./types";
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -63,6 +67,34 @@ export const api = {
 
   dictionary: (word: string) =>
     request<DictionaryResult>(`/api/dictionary/lookup${queryString({ word })}`),
+
+  vocabulary: (
+    params: {
+      q?: string;
+      status?: VocabularyStatus;
+      episodeId?: number;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) => request<VocabularyListResponse>(`/api/vocabulary${queryString(params)}`),
+
+  saveVocabulary: (input: SaveVocabularyInput) =>
+    request<{ word: VocabularyItem }>("/api/vocabulary", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+
+  updateVocabulary: (
+    id: number,
+    patch: { status?: VocabularyStatus; notes?: string },
+  ) =>
+    request<{ word: VocabularyItem }>(`/api/vocabulary/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
+  deleteVocabulary: (id: number) =>
+    request<void>(`/api/vocabulary/${id}`, { method: "DELETE" }),
 
   transcriptionStatus: (episodeId: number) =>
     request<TranscriptionStatus>(`/api/episodes/${episodeId}/transcription`),

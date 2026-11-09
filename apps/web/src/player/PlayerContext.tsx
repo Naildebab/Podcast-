@@ -30,6 +30,8 @@ export interface PlayerActions {
   playAt: (episode: Episode, seconds: number) => void;
   toggle: () => void;
   pause: () => void;
+  beginTranslationMode: () => boolean;
+  endTranslationMode: (resume: boolean) => void;
   seek: (seconds: number) => void;
   skip: (seconds: number) => void;
   setRate: (rate: number) => void;
@@ -89,6 +91,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const pendingSeekRef = useRef(0);
   const lastSavedRef = useRef(0);
   const suppressPauseSaveRef = useRef(false);
+  const translationLockRef = useRef(false);
 
   const [snapshot, setSnapshot] = useState<PlayerSnapshot>(snapshotRef.current);
   const [time, setTime] = useState<PlayerTime>(timeRef.current);
@@ -133,7 +136,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const loadAndPlay = useCallback(
     (next: Episode, startMs?: number) => {
       const audio = audioRef.current;
-      if (!audio) return;
+      if (!audio || translationLockRef.current) return;
 
       episodeRef.current = next;
       suppressPauseSaveRef.current = true;
@@ -175,7 +178,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const toggle = useCallback(() => {
     const audio = audioRef.current;
-    if (!audio || !episodeRef.current) return;
+    if (!audio || !episodeRef.current || translationLockRef.current) return;
     if (audio.paused) {
       const promise = audio.play();
       if (promise) {
@@ -195,8 +198,43 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     audioRef.current?.pause();
   }, []);
 
+  /**
+   * The word-translation panel owns playback while it is open. Callers pass the
+   * returned value back to endTranslationMode so audio only resumes when it was
+   * actually playing before the first word was clicked.
+   */
+  const beginTranslationMode = useCallback((): boolean => {
+    const audio = audioRef.current;
+    const wasPlaying = Boolean(audio && !audio.paused && !audio.ended);
+    translationLockRef.current = true;
+    audio?.pause();
+    return wasPlaying;
+  }, []);
+
+  const endTranslationMode = useCallback(
+    (resume: boolean) => {
+      translationLockRef.current = false;
+      if (!resume) return;
+
+      const audio = audioRef.current;
+      if (!audio || !episodeRef.current || audio.ended || !audio.paused) return;
+
+      const promise = audio.play();
+      if (promise) {
+        promise
+          .then(() => commitSnapshot({ playing: true, error: null }))
+          .catch((error: unknown) => {
+            const message = audioErrorMessage(error);
+            if (message) commitSnapshot({ playing: false, error: message });
+          });
+      }
+    },
+    [commitSnapshot],
+  );
+
   const play = useCallback(
     (next: Episode) => {
+      if (translationLockRef.current) return;
       if (episodeRef.current?.id === next.id && audioRef.current && !audioRef.current.error) {
         toggle();
         return;
@@ -209,7 +247,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const seek = useCallback(
     (seconds: number) => {
       const audio = audioRef.current;
-      if (!audio || !episodeRef.current) return;
+      if (!audio || !episodeRef.current || translationLockRef.current) return;
       const duration =
         Number.isFinite(audio.duration) && audio.duration > 0
           ? audio.duration
@@ -225,7 +263,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const playAt = useCallback(
     (next: Episode, seconds: number) => {
       const audio = audioRef.current;
-      if (!audio) return;
+      if (!audio || translationLockRef.current) return;
       const target = Math.max(0, seconds);
 
       if (episodeRef.current?.id === next.id && !audio.error) {
@@ -399,6 +437,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     };
 
     const onPlay = () => {
+      if (translationLockRef.current) {
+        audio.pause();
+        return;
+      }
       suppressPauseSaveRef.current = false;
       commitSnapshot({ playing: true, error: null, loading: false });
     };
@@ -513,18 +555,25 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const audio = audioRef.current;
     const handlers: [MediaSessionAction, MediaSessionActionHandler][] = [
-      ["play", () => void audio?.play()],
+      [
+        "play",
+        () => {
+          if (!translationLockRef.current) void audio?.play();
+        },
+      ],
       ["pause", () => audio?.pause()],
       [
         "seekbackward",
         () => {
-          if (audio) audio.currentTime = Math.max(0, audio.currentTime - 15);
+          if (audio && !translationLockRef.current) {
+            audio.currentTime = Math.max(0, audio.currentTime - 15);
+          }
         },
       ],
       [
         "seekforward",
         () => {
-          if (audio) {
+          if (audio && !translationLockRef.current) {
             audio.currentTime = Math.min(
               Number.isFinite(audio.duration) ? audio.duration : audio.currentTime + 30,
               audio.currentTime + 30,
@@ -535,7 +584,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       [
         "seekto",
         (details) => {
-          if (audio && details.seekTime !== undefined) audio.currentTime = details.seekTime;
+          if (audio && !translationLockRef.current && details.seekTime !== undefined) {
+            audio.currentTime = details.seekTime;
+          }
         },
       ],
     ];
@@ -571,6 +622,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       playAt,
       toggle,
       pause,
+      beginTranslationMode,
+      endTranslationMode,
       seek,
       skip,
       setRate,
@@ -584,6 +637,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       playAt,
       toggle,
       pause,
+      beginTranslationMode,
+      endTranslationMode,
       seek,
       skip,
       setRate,

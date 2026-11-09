@@ -189,6 +189,45 @@ export interface DictionaryResult {
   };
 }
 
+export type VocabularyStatus = "new" | "learning" | "known";
+
+export interface VocabularyItem {
+  id: number;
+  word: string;
+  normalizedWord: string;
+  lemma: string | null;
+  pos: string | null;
+  ipa: string | null;
+  definitions: string[];
+  arabic: string[];
+  context: string | null;
+  episodeId: number | null;
+  episodeTitle: string | null;
+  podcastTitle: string | null;
+  cueIndex: number | null;
+  startMs: number | null;
+  status: VocabularyStatus;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface VocabularyListResponse {
+  words: VocabularyItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface SaveVocabularyInput {
+  word: string;
+  entryId?: number;
+  episodeId?: number;
+  cueIndex?: number;
+  startMs?: number;
+  context?: string;
+}
+
 export type TranscriptionState =
   | "queued"
   | "downloading"
