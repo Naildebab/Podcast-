@@ -35,6 +35,7 @@ import {
   WordTranslationPanel,
   type TranslationSelection,
 } from "./WordTranslationPanel";
+import { ShadowingDialog } from "./ShadowingDialog";
 
 const FORMAT_LABELS: Record<TranscriptFormat, string> = {
   vtt: "WebVTT",
@@ -638,6 +639,10 @@ function TranscriptReader({
   const [query, setQuery] = useState("");
   const [follow, setFollow] = useState(true);
   const [selection, setSelection] = useState<TranslationSelection | null>(null);
+  const [practice, setPractice] = useState<{
+    cue: TranscriptCue;
+    nextCueStartMs: number | null;
+  } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const panelOpenRef = useRef(false);
   const resumeOnCloseRef = useRef(false);
@@ -708,6 +713,15 @@ function TranscriptReader({
   function seekTo(cue: TranscriptCue) {
     if (cue.startMs === null) return;
     actions.playAt(episode, cue.startMs / 1000);
+  }
+
+  function openPractice(cue: TranscriptCue) {
+    if (panelOpenRef.current) closeTranslation();
+    const position = transcript.cues.findIndex((item) => item.index === cue.index);
+    setPractice({
+      cue,
+      nextCueStartMs: transcript.cues[position + 1]?.startMs ?? null,
+    });
   }
 
   return (
@@ -812,7 +826,8 @@ function TranscriptReader({
       {transcript.timed ? (
         <p className="mt-2 text-[0.65rem] text-muted">
           Click a timestamp to play from that line. Click any word for its definition and
-          Arabic translation.{" "}
+          Arabic translation. Use the microphone button on a line to loop it and record a
+          shadowing take.{" "}
           {isCurrent ? (
             <>The current line follows the audio.</>
           ) : (
@@ -869,7 +884,7 @@ function TranscriptReader({
                 >
                   {cue.startMs === null ? "—" : formatTime(cue.startMs / 1000)}
                 </button>
-                <span className="min-w-0 text-sm leading-relaxed">
+                <span className="min-w-0 flex-1 text-sm leading-relaxed">
                   {cue.speaker ? (
                     <span className="mr-1 font-semibold text-pine">{cue.speaker}:</span>
                   ) : null}
@@ -880,6 +895,20 @@ function TranscriptReader({
                     onWordClick={openTranslation}
                   />
                 </span>
+                {cue.startMs !== null ? (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openPractice(cue);
+                    }}
+                    title="Loop this line and record a shadowing take"
+                    aria-label={`Practice line ${cue.index + 1}`}
+                    className="mt-0.5 shrink-0 rounded-full border border-line bg-surface p-1.5 text-muted transition hover:border-accent/40 hover:bg-accent-soft hover:text-accent-strong"
+                  >
+                    <MicIcon size={14} />
+                  </button>
+                ) : null}
               </div>
             );
           })}
@@ -891,6 +920,15 @@ function TranscriptReader({
           selection={selection}
           episode={episode}
           onClose={closeTranslation}
+        />
+      ) : null}
+
+      {practice ? (
+        <ShadowingDialog
+          episode={episode}
+          cue={practice.cue}
+          nextCueStartMs={practice.nextCueStartMs}
+          onClose={() => setPractice(null)}
         />
       ) : null}
     </div>

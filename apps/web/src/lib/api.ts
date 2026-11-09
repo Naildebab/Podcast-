@@ -10,7 +10,9 @@ import type {
   ProgressStatus,
   ResolveResponse,
   ResourcesResponse,
+  SaveRecordingInput,
   SaveVocabularyInput,
+  ShadowingRecording,
   Transcript,
   TranscriptFormat,
   TranscriptionJob,
@@ -95,6 +97,31 @@ export const api = {
 
   deleteVocabulary: (id: number) =>
     request<void>(`/api/vocabulary/${id}`, { method: "DELETE" }),
+
+  recordings: (episodeId: number, cueIndex?: number) =>
+    request<{ recordings: ShadowingRecording[] }>(
+      `/api/recordings${queryString({ episodeId, cueIndex })}`,
+    ),
+
+  saveRecording: (blob: Blob, input: SaveRecordingInput) =>
+    request<{ recording: ShadowingRecording }>(
+      `/api/recordings${queryString({
+        episodeId: input.episodeId,
+        cueIndex: input.cueIndex,
+        startMs: input.startMs,
+        endMs: input.endMs,
+        durationMs: input.durationMs,
+        label: input.label,
+      })}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": blob.type || "audio/webm" },
+        body: blob,
+      },
+    ),
+
+  deleteRecording: (id: number) =>
+    request<void>(`/api/recordings/${id}`, { method: "DELETE" }),
 
   transcriptionStatus: (episodeId: number) =>
     request<TranscriptionStatus>(`/api/episodes/${episodeId}/transcription`),

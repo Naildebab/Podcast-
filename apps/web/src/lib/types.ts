@@ -228,6 +228,33 @@ export interface SaveVocabularyInput {
   context?: string;
 }
 
+export interface ShadowingRecording {
+  id: number;
+  episodeId: number;
+  cueIndex: number | null;
+  startMs: number | null;
+  endMs: number | null;
+  durationMs: number;
+  mimeType: string;
+  sizeBytes: number;
+  label: string;
+  createdAt: string;
+  audioUrl: string;
+}
+
+export interface RecordingListResponse {
+  recordings: ShadowingRecording[];
+}
+
+export interface SaveRecordingInput {
+  episodeId: number;
+  cueIndex?: number;
+  startMs?: number;
+  endMs?: number;
+  durationMs?: number;
+  label?: string;
+}
+
 export type TranscriptionState =
   | "queued"
   | "downloading"

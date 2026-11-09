@@ -129,6 +129,24 @@ const MIGRATIONS: string[] = [
   CREATE INDEX idx_vocabulary_updated
     ON vocabulary(updated_at DESC);
   `,
+  `
+  CREATE TABLE shadowing_recordings (
+    id INTEGER PRIMARY KEY,
+    episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    cue_index INTEGER,
+    start_ms INTEGER,
+    end_ms INTEGER,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    mime_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    label TEXT NOT NULL DEFAULT 'Take',
+    file_name TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX idx_shadowing_recordings_cue
+    ON shadowing_recordings(episode_id, cue_index, created_at DESC);
+  `,
 ];
 
 export function migrate(db: Db): void {

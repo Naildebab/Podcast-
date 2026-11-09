@@ -28,6 +28,16 @@ import {
   refreshPodcast,
   saveProgress,
 } from "./library.js";
+import {
+  deleteRecording,
+  getRecordingAudio,
+  listRecordings,
+  MAX_RECORDING_BYTES,
+  normalizeRecordingMime,
+  purgePodcastRecordings,
+  RecordingInputError,
+  saveRecording,
+} from "./recordings.js";
 import { looksLikeFeed, parseFeed, type ParsedFeed } from "./rss.js";
 import { parseTranscript, TranscriptParseError, type TranscriptFormat } from "./transcript.js";
 import {
@@ -66,6 +76,7 @@ export class HttpError extends Error {
 export interface AppOptions {
   fetchText?: FetchText;
   webDist?: string | null;
+  recordingsDir?: string;
 }
 
 const urlSchema = z.string().trim().min(1, "Paste an address first.").max(2000);
@@ -135,6 +146,28 @@ const vocabularyPatchSchema = z
     message: "Send a status or notes to update.",
   });
 
+const recordingQuerySchema = z.object({
+  episodeId: z.coerce.number().int().positive(),
+  cueIndex: z.coerce.number().int().min(0).max(1_000_000).optional(),
+});
+
+const recordingUploadSchema = z
+  .object({
+    episodeId: z.coerce.number().int().positive(),
+    cueIndex: z.coerce.number().int().min(0).max(1_000_000).optional(),
+    startMs: z.coerce.number().int().min(0).max(12 * 60 * 60 * 1000).optional(),
+    endMs: z.coerce.number().int().min(0).max(12 * 60 * 60 * 1000).optional(),
+    durationMs: z.coerce.number().int().min(0).max(30 * 60 * 1000).optional(),
+    label: z.string().trim().max(120).optional(),
+  })
+  .refine(
+    (value) =>
+      value.startMs === undefined ||
+      value.endMs === undefined ||
+      value.endMs >= value.startMs,
+    { message: "The end time must not be before the start time.", path: ["endMs"] },
+  );
+
 const TRANSCRIPT_MAX_BYTES = 4 * 1024 * 1024;
 const TRANSCRIPT_ACCEPT =
   "text/vtt, application/x-subrip, text/srt, application/json, text/plain, */*";
@@ -151,6 +184,89 @@ function payloadTooLarge(error: unknown): boolean {
 function isBinaryContentType(contentType: string): boolean {
   const type = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
   return type.startsWith("image/") || type.startsWith("audio/") || type.startsWith("video/");
+}
+
+function sendRecordingFile(
+  req: Request,
+  res: Response,
+  filePath: string,
+  mimeType: string,
+  fileName: string,
+): void {
+  let size: number;
+  try {
+    size = fs.statSync(filePath).size;
+  } catch {
+    throw new HttpError(404, "That recording audio could not be found.");
+  }
+
+  res.setHeader("Content-Type", mimeType);
+  res.setHeader("Accept-Ranges", "bytes");
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("Content-Disposition", `inline; filename="${fileName}"`);
+
+  const range = req.headers.range;
+  if (!range) {
+    res.setHeader("Content-Length", size);
+    const stream = fs.createReadStream(filePath);
+    stream.on("error", () => {
+      if (!res.headersSent) {
+        res.status(500).json({ error: "That recording audio could not be read." });
+      } else {
+        res.destroy();
+      }
+    });
+    stream.pipe(res);
+    return;
+  }
+
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+  if (!match) {
+    res.status(416).setHeader("Content-Range", `bytes */${size}`).end();
+    return;
+  }
+
+  const startText = match[1] ?? "";
+  const endText = match[2] ?? "";
+  let start: number;
+  let end: number;
+
+  if (startText === "") {
+    const suffix = Number(endText);
+    if (!Number.isInteger(suffix) || suffix <= 0) {
+      res.status(416).setHeader("Content-Range", `bytes */${size}`).end();
+      return;
+    }
+    start = Math.max(size - suffix, 0);
+    end = size - 1;
+  } else {
+    start = Number(startText);
+    end = endText === "" ? size - 1 : Number(endText);
+    if (
+      !Number.isInteger(start) ||
+      !Number.isInteger(end) ||
+      start < 0 ||
+      start >= size ||
+      end < start
+    ) {
+      res.status(416).setHeader("Content-Range", `bytes */${size}`).end();
+      return;
+    }
+    end = Math.min(end, size - 1);
+  }
+
+  res.status(206);
+  res.setHeader("Content-Range", `bytes ${start}-${end}/${size}`);
+  res.setHeader("Content-Length", end - start + 1);
+  const stream = fs.createReadStream(filePath, { start, end });
+  stream.on("error", () => {
+    if (!res.headersSent) {
+      res.status(500).json({ error: "That recording audio could not be read." });
+    } else {
+      res.destroy();
+    }
+  });
+  stream.pipe(res);
 }
 
 async function loadTranscriptFromUrl(
@@ -233,18 +349,19 @@ async function readFeedDirect(url: string, fetchText: FetchText): Promise<Parsed
 export function createApp(db: Db, options: AppOptions = {}): express.Express {
   const app = express();
   const fetchText = options.fetchText ?? realFetchText;
+  const recordingsDir = options.recordingsDir;
 
   app.disable("x-powered-by");
   app.use(express.json({ limit: "6mb" }));
 
   app.get("/api/health", (_req, res) => {
-    res.json({ ok: true, version: "0.4.0", phase: 4 });
+    res.json({ ok: true, version: "0.5.0", phase: 5 });
   });
 
   app.get("/api/meta", (_req, res) => {
     res.json({
-      version: "0.4.0",
-      phase: 4,
+      version: "0.5.0",
+      phase: 5,
       dataDir: dataDir(),
       stats: getStats(db),
     });
@@ -401,8 +518,14 @@ export function createApp(db: Db, options: AppOptions = {}): express.Express {
   });
 
   app.delete("/api/podcasts/:id", (req, res) => {
-    const removed = deletePodcast(db, parseId(req.params.id));
-    if (!removed) throw new HttpError(404, "That podcast is not in your library.");
+    const id = parseId(req.params.id);
+    if (!getPodcast(db, id)) {
+      throw new HttpError(404, "That podcast is not in your library.");
+    }
+    purgePodcastRecordings(db, id, recordingsDir);
+    if (!deletePodcast(db, id)) {
+      throw new HttpError(404, "That podcast is not in your library.");
+    }
     res.status(204).end();
   });
 
@@ -541,6 +664,79 @@ export function createApp(db: Db, options: AppOptions = {}): express.Express {
     res.json({ progress });
   });
 
+  // --- Shadowing recordings ----------------------------------------------
+
+  app.get("/api/recordings", (req, res) => {
+    const query = recordingQuerySchema.parse(req.query);
+    if (!getEpisode(db, query.episodeId)) {
+      throw new HttpError(404, "That episode could not be found.");
+    }
+    res.json({ recordings: listRecordings(db, query.episodeId, query.cueIndex) });
+  });
+
+  app.post(
+    "/api/recordings",
+    express.raw({ type: "audio/*", limit: MAX_RECORDING_BYTES }),
+    (req, res) => {
+      const input = recordingUploadSchema.parse(req.query);
+      if (!getEpisode(db, input.episodeId)) {
+        throw new HttpError(404, "That episode could not be found.");
+      }
+
+      const contentType = req.headers["content-type"] ?? "";
+      if (!normalizeRecordingMime(contentType)) {
+        throw new HttpError(
+          415,
+          "Send the take as raw audio using a supported browser recording format.",
+        );
+      }
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        throw new HttpError(400, "The recording was empty.");
+      }
+
+      try {
+        const recording = saveRecording(
+          db,
+          {
+            episodeId: input.episodeId,
+            cueIndex: input.cueIndex,
+            startMs: input.startMs,
+            endMs: input.endMs,
+            durationMs: input.durationMs,
+            label: input.label,
+            mimeType: contentType,
+            data: req.body,
+          },
+          recordingsDir,
+        );
+        res.status(201).json({ recording });
+      } catch (error) {
+        if (error instanceof RecordingInputError) {
+          throw new HttpError(400, error.message);
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get("/api/recordings/:id/audio", (req, res) => {
+    const found = getRecordingAudio(db, parseId(req.params.id), recordingsDir);
+    if (!found) throw new HttpError(404, "That recording could not be found.");
+    sendRecordingFile(
+      req,
+      res,
+      found.filePath,
+      found.recording.mimeType,
+      path.basename(found.filePath),
+    );
+  });
+
+  app.delete("/api/recordings/:id", (req, res) => {
+    const removed = deleteRecording(db, parseId(req.params.id), recordingsDir);
+    if (!removed) throw new HttpError(404, "That recording could not be found.");
+    res.status(204).end();
+  });
+
   // --- Home summary -------------------------------------------------------
 
   app.get("/api/home", (_req, res) => {
@@ -583,7 +779,8 @@ export function createApp(db: Db, options: AppOptions = {}): express.Express {
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (payloadTooLarge(error)) {
       res.status(413).json({
-        error: "That transcript is too large. The limit is about 4 MB of text.",
+        error:
+          "That upload is too large. Transcripts are limited to about 4 MB and recordings to 25 MB.",
       });
       return;
     }

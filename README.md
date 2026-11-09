@@ -1,20 +1,21 @@
 # Podcast Language Studio
 
-A local-first podcast player for language learners. Phase 4 adds click-to-translate and a
-vocabulary list on top of the listening foundation, transcripts, local Wiktionary
-dictionary, and local Whisper transcription: import public RSS feeds, browse a hand-checked
-catalog, play episodes in a persistent player, read along with publisher or imported
-transcripts, click any word for its definition and Arabic translation, save words with
-their source context, and transcribe an episode on your own CPU.
+A local-first podcast player for language learners. Phase 5 adds shadowing loops and local
+microphone recordings on top of the listening foundation, transcripts, local Wiktionary
+dictionary, local Whisper transcription, click-to-translate, and vocabulary: import public
+RSS feeds, browse a hand-checked catalog, play episodes in a persistent player, read along
+with publisher or imported transcripts, click any word for its definition and Arabic
+translation, save words with their source context, loop a line and record your own take,
+and transcribe an episode on your own CPU.
 
 No account. No API keys. No analytics. Your library, listening positions, transcripts,
-and vocabulary live in a SQLite file on your own computer; small display and playback
+vocabulary, and recordings live on your own computer; small display and playback
 preferences stay in browser local storage. The dictionary and Whisper installation are
 reused from their existing locations rather than copied into this project.
 
-> Status: **Phase 4 — vocabulary and click-to-translate**. Shadowing, spaced repetition,
-> and Android are planned for later phases. Labels in the interface say “Soon” when a
-> feature is not built yet.
+> Status: **Phase 5 — shadowing and local recording**. Spaced repetition, OPML, offline
+> audio, and Android are planned for later phases. Labels in the interface say “Soon” when
+> a feature is not built yet.
 
 ## What works
 
@@ -47,6 +48,10 @@ reused from their existing locations rather than copied into this project.
   entry keeps its dictionary data, source episode, timestamp, context sentence, note, and
   a simple New / Learning / Known status. The Vocabulary page supports search, filtering,
   editing notes, and removal.
+- **Shadowing and local recording** — every timed transcript line has a practice button.
+  Loop the original line with a 1–5 second gap, record a take through your microphone,
+  listen back, and save it. Takes are attached to the episode and cue, stored on this
+  computer, and can be played or deleted from the same practice dialog.
 - **Local dictionary** — search the existing Wiktionary SQLite database for definitions,
   IPA, Arabic translations, and available word forms. It is opened read-only; no lookup
   leaves the computer.
@@ -61,8 +66,9 @@ reused from their existing locations rather than copied into this project.
 - **Responsive interface** — desktop sidebar, mobile top navigation, bottom mini player,
   and layouts that work down to phone widths.
 - **Local server hardening** — private, loopback, and link-local addresses are rejected
-  before every request, including each redirect hop. Feed downloads are capped at 20 MB
-  and transcript downloads at 4 MB; requests time out after 20 seconds.
+  before every request, including each redirect hop. Feed downloads are capped at 20 MB,
+  transcript downloads at 4 MB, and recording uploads at 25 MB; requests time out after 20
+  seconds.
 
 ## Transcripts
 
@@ -81,8 +87,9 @@ Supported inputs:
 The episode page highlights the active timed line, optionally scrolls with playback, and
 lets you click a timestamp to seek there. If the episode is not loaded yet, clicking a cue
 starts it at that point. Untimed transcripts remain readable but do not follow the audio.
-You can search the transcript, reload it from its source, replace it with an imported file,
-or remove the local copy.
+Timed lines also show the microphone button for shadowing practice. You can search the
+transcript, reload it from its source, replace it with an imported file, or remove the
+local copy.
 
 The importer accepts pasted text or a file up to 4 MB. Publisher HTML transcript pages are
 not scraped; the app explains that limitation and keeps the manual import path available.
@@ -112,6 +119,30 @@ timestamp, and context sentence. You can also save dictionary entries directly f
 Dictionary page. Saved words appear on the Vocabulary page, where you can search, filter
 by status, write a note, and delete entries. Vocabulary is stored in this app’s SQLite
 database, not in the borrowed Wiktionary file.
+
+## Shadowing and local recordings
+
+Timed transcript lines have a small microphone button. It opens a practice dialog that
+pauses the episode and shows the line, its timestamps, and the original text. From there:
+
+- **Play line** starts the original at that cue and pauses at the end of the line.
+- **Loop line** repeats the cue. The gap between repeats is configurable from 1 to 5
+  seconds, so there is room to say the line before it plays again.
+- **Record your voice** captures a take through the browser microphone. Starting a take
+  pauses the original line, and playing either the original or a take pauses the other.
+- **Save take** stores the audio and its episode, cue, timestamps, duration, MIME type,
+  size, and creation time. Saved takes are listed for that line and can be played or
+  deleted. Closing with an unsaved take asks before discarding it.
+
+Recordings are capped at five minutes and 25 MB per take. Browsers record in a format they
+support (typically WebM/Opus, Ogg/Opus, or MP4); the local server accepts the common
+browser recording formats. Microphone access requires the page to run on `localhost` or
+HTTPS, and the browser still asks for permission.
+
+There is no upload or cloud step. Audio files are written to the app's data folder and
+metadata is stored in SQLite. The audio endpoint supports byte ranges so the browser can
+seek within a take. Deleting a podcast removes its take files as well as its database rows.
+Recordings are not transcribed, scored, or sent anywhere.
 
 ## Existing local language tools
 
@@ -166,14 +197,15 @@ one is missing.
 
 ## Not built yet
 
-These are honest Phase 4 boundaries, not hidden buttons:
+These are honest Phase 5 boundaries, not hidden buttons:
 
 - Automatic transcription on episode open (transcription is always explicit)
 - Cloud transcription, translation, or dictionary APIs
 - Scraping arbitrary HTML transcript pages (paste the text instead)
 - Spaced-repetition scheduling and generated study sheets (the Vocabulary page is a
   simple status list, not an SRS system)
-- Shadowing and local recording (Phase 5)
+- Recording analysis, pronunciation scoring, or practice analytics
+- Cloud sync or upload of recordings
 - OPML import/export
 - Offline audio downloads (temporary transcription audio is deleted)
 - Android app
@@ -244,22 +276,28 @@ PODCAST_STUDIO_DATA=/path/to/podcast-data npm start
 ```
 
 - The database uses SQLite in WAL mode with foreign keys enabled.
+- Shadowing takes are audio files in the `recordings/` folder inside the data directory;
+  their episode, cue, duration, format, size, and timestamp live in the database. File
+  names are generated locally and are not derived from user input.
 - Audio is normally **streamed from the publisher** and is not copied into the database.
   A local transcription temporarily downloads the episode audio to the OS temp folder and
-  deletes it after Whisper finishes or the job is cancelled.
+  deletes it after Whisper finishes or the job is cancelled. Saved shadowing takes are the
+  only audio files this app keeps.
 - The dictionary database and Whisper model live outside this project's data folder and
   are never copied into it. The dictionary is opened read-only.
 - Transcripts are stored in the same database as parsed cues. Removing a podcast or
   episode removes its transcript; removing a transcript does not affect the audio or your
-  progress.
+  progress. Take files remain until their podcast is removed or the take is deleted.
 - Vocabulary entries and their notes are stored in the same database. Deleting a podcast
   keeps the saved word and definition but clears its link to the removed episode.
+- Deleting a podcast removes the take files stored for its episodes as well as their
+  metadata.
 - Cover images and audio load directly from the publisher in your browser, so the
   publisher can see your IP address just as it would with any podcast app.
 - The server binds to `127.0.0.1` by default and is not exposed to your local network.
   Override with `HOST` and `PORT` if you know what you are doing.
-- To back up, stop the server and copy the whole data folder (including `app.db-wal` and
-  `app.db-shm` if present).
+- To back up, stop the server and copy the whole data folder (including `app.db-wal`,
+  `app.db-shm`, and `recordings/` if present).
 - The old prototype's dictionary is read from `~/.local/share/podcast-language-studio`
   only when you request a lookup; the file is opened read-only and is never modified. The
   rest of that prototype's data is not used by this project.
@@ -269,19 +307,22 @@ PODCAST_STUDIO_DATA=/path/to/podcast-data npm start
 - No accounts, tracking scripts, analytics, or third-party APIs.
 - The server only fetches a URL when you ask it to resolve, preview, add, or refresh a
   feed, explicitly load a transcript, or start a local transcription (which fetches the
-  episode audio).
+  episode audio). Recording and playback compare takes stay on the machine.
 - Before fetching, it resolves the hostname and rejects loopback, private, link-local,
   unique-local, and unspecified addresses. Redirects are followed manually, one hop at a
   time, and every hop is checked again.
 - Feed downloads are limited to 20 MB and 20 seconds; transcript downloads are limited to
-  4 MB. Temporary audio for transcription is capped at 250 MB and five minutes by default.
+  4 MB; recording uploads are limited to 25 MB. Temporary audio for transcription is
+  capped at 250 MB and five minutes by default.
 - Feed, transcript, and audio response bodies are treated as untrusted data. Feed and
-  transcript text is parsed, never executed.
+  transcript text is parsed, never executed. Recorded audio is stored as bytes and is
+  never parsed as markup.
 - Whisper runs locally. The model, executable, and dictionary are never uploaded. The
   dictionary lookup path has no network code at all.
-- Imported transcripts are sent only to your local server and written to your local
-  database; they are not uploaded to a third-party service.
-- The UI has no fake “implemented” states: planned practice features are visibly marked
+- Imported transcripts and shadowing takes are sent only to your local server. Transcripts
+  are written to the local database; takes are written to the local recordings folder.
+  Neither is sent to a third-party service.
+- The UI has no fake “implemented” states: planned later features are visibly marked
   “Soon”. When Whisper or the dictionary is missing, the UI says so instead of showing a
   button that cannot work.
 
@@ -313,6 +354,7 @@ instead of pretending to search it. OPML import is planned.
 │   │   │   ├── transcripts.ts Transcript and cue storage queries
 │   │   │   ├── dictionary.ts Read-only Wiktionary database queries
 │   │   │   ├── vocabulary.ts Saved words, dictionary enrichment, and notes
+│   │   │   ├── recordings.ts Shadowing takes and local audio file storage
 │   │   │   ├── whisper.ts   Local Whisper job manager and VTT import
 │   │   │   ├── http.ts     SSRF-safe fetch and temporary audio downloads
 │   │   │   ├── discovery.ts Website/feed resolution and previews
@@ -322,7 +364,7 @@ instead of pretending to search it. OPML import is planned.
 │   └── web/               React 19 + TypeScript + Vite + Tailwind 4
 │       └── src/
 │           ├── pages/      Home, Discover, Library, Episodes, Episode, Dictionary, Vocabulary, Settings
-│           ├── components/ Layout, player, transcript, translation panel, cards, dialogs
+│           ├── components/ Layout, player, transcript, translation panel, shadowing dialog, cards, dialogs
 │           ├── player/     Global audio state and progress saving
 │           └── theme/      Light/dark/system handling
 ├── catalog/podcasts.json  Hand-checked starter feeds
@@ -359,12 +401,16 @@ All routes are under `/api`.
 | POST   | `/episodes/:id/transcribe`   | Start a local Whisper transcription         |
 | DELETE | `/episodes/:id/transcription`| Cancel the active local transcription       |
 | PUT    | `/episodes/:id/progress`     | Save position and/or status                |
+| GET    | `/recordings`                | List takes for an episode or cue           |
+| POST   | `/recordings`                | Upload raw audio for a shadowing take      |
+| GET    | `/recordings/:id/audio`      | Stream a take, with byte-range support     |
+| DELETE | `/recordings/:id`            | Remove a take and its audio file           |
 | GET    | `/home`                      | Stats, continue-listening, recent episodes |
 
 Errors return `{ "error": "..." }` with a meaningful status code: `400` for validation,
-`404` for missing records, `409` for duplicate feeds, `413` for oversized transcript
-imports, `422` for feeds or transcripts that cannot be read, `503` when a local resource
-is missing, and `500` for unexpected server errors.
+`404` for missing records, `409` for duplicate feeds, `413` for oversized uploads, `415`
+for an unsupported recording format, `422` for feeds or transcripts that cannot be read,
+`503` when a local resource is missing, and `500` for unexpected server errors.
 
 ## Testing
 
@@ -388,6 +434,8 @@ The server suite covers:
   using a temporary fixture database
 - Vocabulary save/deduplicate/list/filter/search/update/delete behavior, dictionary
   enrichment, source context, and API error cases
+- Shadowing upload/list/byte-range/delete routes, format and empty-upload validation, and
+  audio-file cleanup when a podcast is deleted
 
 The tests use fixtures and an injected fetch function, so they do not need the network.
 Manual QA should still try a real feed with transcripts, such as
@@ -406,6 +454,15 @@ updates the translation without resuming; X, Escape, and outside-click close it 
 only when appropriate. Then repeat from an initially paused player and confirm closing
 still leaves it paused. Save a word from the panel and from Dictionary, confirm it appears
 on Vocabulary, change its status, save a note, then delete it.
+
+For shadowing, open the microphone button on a timed transcript line. Confirm the episode
+pauses, “Play line” starts at that cue, and “Loop line” repeats after the selected gap.
+Record a short take with microphone permission allowed, stop, listen back, save it, and
+confirm it appears in the saved-takes list. Reload the episode and confirm the take is
+still there; play it, then delete it. Repeat with permission denied and confirm the error
+is readable. Close while recording or holding an unsaved take and confirm the discard
+prompt appears. Finally delete a test podcast and confirm its `recordings/` files are
+gone.
 
 ## Design notes
 
@@ -427,7 +484,8 @@ playback progress is saved, and how transcripts are fetched, parsed, and stored.
   transcription using the resources already on this computer.
 - **Phase 4 (done)** — click-to-translate with reliable pause/resume, vocabulary capture,
   source context, notes, and status filters.
-- **Phase 5** — shadowing loops and local recording.
+- **Phase 5 (done)** — cue-level shadowing loops with configurable gaps, local microphone
+  recording, playback comparison, saved takes, and local audio-file cleanup.
 - **Later** — spaced-repetition scheduling, OPML import/export, offline audio, Android
   client.
 

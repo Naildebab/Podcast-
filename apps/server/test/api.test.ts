@@ -29,6 +29,7 @@ let base: string;
 let pages: Map<string, FetchedText>;
 let dictionaryDir: string;
 let dictionaryDb: Database.Database;
+let recordingsDir: string;
 
 async function listen(app: ReturnType<typeof createApp>): Promise<Server> {
   return new Promise((resolve, reject) => {
@@ -52,9 +53,27 @@ async function api(
   };
 }
 
+async function upload(
+  path: string,
+  body: Uint8Array,
+  contentType = "audio/webm",
+): Promise<{ status: number; body: any }> {
+  const response = await fetch(`${base}${path}`, {
+    method: "POST",
+    headers: { "content-type": contentType },
+    body,
+  });
+  const text = await response.text();
+  return {
+    status: response.status,
+    body: text ? JSON.parse(text) : null,
+  };
+}
+
 beforeEach(async () => {
   db = openDb(":memory:");
   dictionaryDir = fs.mkdtempSync(path.join(os.tmpdir(), "pls-api-dictionary-"));
+  recordingsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pls-api-recordings-"));
   process.env.PODCAST_DICTIONARY_DB = path.join(dictionaryDir, "dictionary.db");
   dictionaryDb = createTestDictionary(process.env.PODCAST_DICTIONARY_DB);
   pages = new Map([
@@ -106,7 +125,7 @@ beforeEach(async () => {
     return page;
   };
 
-  server = await listen(createApp(db, { fetchText, webDist: null }));
+  server = await listen(createApp(db, { fetchText, webDist: null, recordingsDir }));
   const address = server.address() as AddressInfo;
   base = `http://127.0.0.1:${address.port}`;
 });
@@ -118,13 +137,14 @@ afterEach(async () => {
   dictionaryDb.close();
   delete process.env.PODCAST_DICTIONARY_DB;
   fs.rmSync(dictionaryDir, { recursive: true, force: true });
+  fs.rmSync(recordingsDir, { recursive: true, force: true });
 });
 
 describe("health and metadata", () => {
   it("reports that the local server is ready", async () => {
     const response = await api("/api/health");
     expect(response.status).toBe(200);
-    expect(response.body).toMatchObject({ ok: true, phase: 4 });
+    expect(response.body).toMatchObject({ ok: true, phase: 5 });
   });
 });
 
@@ -592,5 +612,151 @@ describe("transcripts", () => {
         })
       ).status,
     ).toBe(404);
+  });
+});
+
+describe("shadowing recordings", () => {
+  async function addTestPodcast() {
+    const added = await api("/api/podcasts", {
+      method: "POST",
+      body: JSON.stringify({ feedUrl: "https://example.com/feed.xml" }),
+    });
+    const episodes = await api(`/api/episodes?podcastId=${added.body.podcast.id}`);
+    return {
+      podcastId: added.body.podcast.id as number,
+      episode: episodes.body.episodes.find(
+        (item: { title: string }) => item.title === "Episode One & Friends",
+      ) as { id: number },
+    };
+  }
+
+  it("stores, lists, streams with range support, and deletes a take", async () => {
+    const { episode } = await addTestPodcast();
+    const bytes = Buffer.from("fake webm audio bytes");
+
+    const saved = await upload(
+      `/api/recordings?episodeId=${episode.id}&cueIndex=0&startMs=1000&endMs=3000&durationMs=2100`,
+      bytes,
+      "audio/webm;codecs=opus",
+    );
+    expect(saved.status).toBe(201);
+    expect(saved.body.recording).toMatchObject({
+      episodeId: episode.id,
+      cueIndex: 0,
+      startMs: 1000,
+      endMs: 3000,
+      durationMs: 2100,
+      mimeType: "audio/webm",
+      sizeBytes: bytes.length,
+      label: "Take",
+    });
+    expect(saved.body.recording.audioUrl).toMatch(
+      new RegExp(`^/api/recordings/\\d+/audio$`),
+    );
+    expect(fs.readdirSync(recordingsDir)).toHaveLength(1);
+
+    const listed = await api(`/api/recordings?episodeId=${episode.id}&cueIndex=0`);
+    expect(listed.status).toBe(200);
+    expect(listed.body.recordings).toHaveLength(1);
+    expect(listed.body.recordings[0].id).toBe(saved.body.recording.id);
+    expect(
+      (await api(`/api/recordings?episodeId=${episode.id}&cueIndex=9`)).body.recordings,
+    ).toHaveLength(0);
+
+    const audio = await fetch(`${base}${saved.body.recording.audioUrl}`);
+    expect(audio.status).toBe(200);
+    expect(audio.headers.get("content-type")).toBe("audio/webm");
+    expect(Buffer.from(await audio.arrayBuffer())).toEqual(bytes);
+
+    const ranged = await fetch(`${base}${saved.body.recording.audioUrl}`, {
+      headers: { range: "bytes=0-3" },
+    });
+    expect(ranged.status).toBe(206);
+    expect(ranged.headers.get("content-range")).toBe(`bytes 0-3/${bytes.length}`);
+    expect(Buffer.from(await ranged.arrayBuffer()).toString()).toBe("fake");
+
+    const removed = await api(`/api/recordings/${saved.body.recording.id}`, {
+      method: "DELETE",
+    });
+    expect(removed.status).toBe(204);
+    expect(
+      (await api(`/api/recordings?episodeId=${episode.id}`)).body.recordings,
+    ).toHaveLength(0);
+    expect(fs.readdirSync(recordingsDir)).toHaveLength(0);
+    expect(
+      (await fetch(`${base}${saved.body.recording.audioUrl}`)).status,
+    ).toBe(404);
+  });
+
+  it("validates missing episodes, formats, and empty uploads", async () => {
+    const { episode } = await addTestPodcast();
+    const bytes = Buffer.from("fake webm audio bytes");
+
+    expect(
+      (
+        await upload(
+          `/api/recordings?episodeId=999&cueIndex=0`,
+          bytes,
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await upload(
+          `/api/recordings?cueIndex=0`,
+          bytes,
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await upload(
+          `/api/recordings?episodeId=${episode.id}`,
+          bytes,
+          "audio/midi",
+        )
+      ).status,
+    ).toBe(415);
+    expect(
+      (
+        await upload(
+          `/api/recordings?episodeId=${episode.id}`,
+          bytes,
+          "text/plain",
+        )
+      ).status,
+    ).toBe(415);
+    expect(
+      (
+        await upload(
+          `/api/recordings?episodeId=${episode.id}`,
+          Buffer.alloc(0),
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await upload(
+          `/api/recordings?episodeId=${episode.id}&startMs=5000&endMs=1000`,
+          bytes,
+        )
+      ).status,
+    ).toBe(400);
+  });
+
+  it("removes saved take files when their podcast is deleted", async () => {
+    const { podcastId, episode } = await addTestPodcast();
+    const saved = await upload(
+      `/api/recordings?episodeId=${episode.id}&cueIndex=1&startMs=1000&endMs=3000`,
+      Buffer.from("another fake take"),
+    );
+    expect(saved.status).toBe(201);
+    expect(fs.readdirSync(recordingsDir)).toHaveLength(1);
+
+    expect((await api(`/api/podcasts/${podcastId}`, { method: "DELETE" })).status).toBe(
+      204,
+    );
+    expect(fs.readdirSync(recordingsDir)).toHaveLength(0);
+    expect((await api(`/api/recordings?episodeId=${episode.id}`)).status).toBe(404);
   });
 });

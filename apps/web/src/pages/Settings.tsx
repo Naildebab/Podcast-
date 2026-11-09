@@ -287,7 +287,13 @@ export function Settings() {
             {
               phase: "Phase 5",
               title: "Shadowing",
-              body: "Loop phrases, record your voice locally, and track practice time.",
+              body: "Loop transcript lines, record takes with your microphone, and compare them locally.",
+              done: true,
+            },
+            {
+              phase: "Later",
+              title: "Study and offline",
+              body: "Spaced repetition, OPML import/export, offline audio, and an Android client.",
             },
           ].map((item) => (
             <div
@@ -308,8 +314,7 @@ export function Settings() {
           ))}
         </div>
         <Notice className="mt-4">
-          Android is a later phase. Phase 4 remains a local web app; no mobile build has
-          been started.
+          Phase 5 remains a local web app; no mobile build has been started.
         </Notice>
       </section>
     </div>

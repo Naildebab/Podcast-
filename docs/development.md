@@ -1,6 +1,6 @@
 # Development notes
 
-This document records the architecture and the decisions behind Phase 4. It is meant for
+This document records the architecture and the decisions behind Phase 5. It is meant for
 whoever maintains the project next — including future me.
 
 ## Stack
@@ -50,7 +50,8 @@ message, so the API can run alone during development.
 2. `~/.local/share/podcast-plus`
 
 The folder is created on demand. The database is `app.db` inside it. WAL mode and foreign
-keys are enabled on every connection. The old prototype directory
+keys are enabled on every connection. Shadowing audio lives in a `recordings/` subfolder;
+media files are never stored as SQLite blobs. The old prototype directory
 (`~/.local/share/podcast-language-studio`) is used only as the default location of the
 borrowed, read-only dictionary database; no other file there is read or written.
 
@@ -101,6 +102,17 @@ borrowed, read-only dictionary database; no other file there is read or written.
 - `episode_id` uses `ON DELETE SET NULL`, so deleting a podcast keeps the word and its
   definition but clears the broken source link; nullable unique columns avoid a collision
   when several saved words lose their episode at once
+
+`shadowing_recordings` (migration 5)
+
+- one row per saved take: `episode_id` (cascade delete), optional `cue_index`,
+  `start_ms`/`end_ms`, `duration_ms`, `mime_type`, `size_bytes`, `label`, unique generated
+  `file_name`, and `created_at`
+- indexed by `(episode_id, cue_index, created_at DESC)` so the practice dialog can list a
+  line's takes without scanning the table
+- the audio bytes live in `<dataDir>/recordings/<uuid>.<ext>`, never in SQLite. Deleting a
+  take removes both the row and its file. Podcast deletion explicitly purges take files
+  before the episode cascade removes the rows, because SQLite cannot delete files.
 
 `settings`
 
@@ -242,6 +254,90 @@ ignores clicks on `[data-translate-word]`. Using click rather than pointerdown a
 touch scroll does not close the panel or resume audio by accident. Dictionary requests are
 cancelled defensively with an `active` flag when the selected word changes.
 
+## Shadowing and local recordings
+
+The transcript reader adds a microphone button to each cue that has a start timestamp.
+Clicking it opens `ShadowingDialog`, which receives the cue, its end, and the next cue's
+start time. Untimed reading blocks have no practice button because a loop needs a range.
+
+### Looping a cue
+
+The dialog resolves the end of the line in this order:
+
+1. the cue's own `end_ms`;
+2. the next cue's start;
+3. an estimate based on word count (2.5–12 seconds), capped by the episode duration.
+
+It never allows a range shorter than 500 ms. The dialog pauses the episode when it mounts,
+so practising does not compete with background audio.
+
+“Play line” calls the existing `playAt(episode, startMs / 1000)` player action and marks a
+one-shot boundary. A time watcher pauses when playback reaches the cue end. “Loop line”
+does the same and then watches `PlayerTime`:
+
+- when `currentTime` reaches the cue end, the player is paused;
+- a timeout waits the selected gap (1, 2, 3, or 5 seconds);
+- the timeout calls `playAt` again from the cue start; stopping the loop clears the timer.
+
+This keeps one episode audio element and one source of truth. The loop is deliberately not
+implemented with `audio.loop`, because a cue is a range, not the whole file. Timers are
+cleared when the loop is stopped, the dialog unmounts, or the loaded episode changes.
+`PlayerContext` does not need a shadowing lock: the dialog is modal and only exposes
+explicit player actions.
+
+The take preview uses a second `<audio controls>` element. That is separate from the global
+player on purpose: it only plays local take files, never episode audio, and it does not
+touch progress or resume state. Starting the original pauses a playing take; starting a
+take or changing the loop pauses the original.
+
+### Recording
+
+`navigator.mediaDevices.getUserMedia({ audio: ... })` requests the microphone and
+`MediaRecorder` captures the take. The client tries WebM/Opus, WebM, Ogg/Opus, Ogg, then
+MP4. Starting a recording pauses the loop and the original. The UI:
+
+- shows elapsed time and stops automatically at five minutes;
+- stops all media tracks on stop, cancel, unmount, or error;
+- rejects an empty blob and a blob over 25 MB;
+- creates an object URL for immediate playback and revokes it after save, discard, or
+  unmount;
+- keeps an unsaved take in the dialog and asks before closing if a take exists or a
+  recording is still active.
+
+Permission and device failures are translated into readable messages (denied, no device,
+device busy). Recording needs `localhost` or HTTPS because browsers only expose
+`getUserMedia` in a secure context.
+
+### Storage and API
+
+`apps/server/src/recordings.ts` owns metadata and files:
+
+- `saveRecording` validates the MIME type and size, creates the recordings folder with mode
+  `0700`, writes a generated UUID filename with mode `0600`, inserts the row, and removes
+  the file if the insert fails.
+- `getRecordingAudio` returns the row plus a path assembled from the stored generated
+  filename. `path.basename` is applied before joining, so a malformed row cannot escape the
+  folder.
+- `deleteRecording` removes the row and file. `purgePodcastRecordings` collects and removes
+  the files for a podcast before the episode cascade deletes their rows.
+- Accepted types are WebM, Ogg, MP4/M4A, WAV, MPEG, and AAC. Codec parameters are stripped
+  before matching, so `audio/webm;codecs=opus` is stored as `audio/webm` with a `.webm`
+  extension.
+
+The API uses `express.raw({ type: "audio/*", limit: 25 MB })` on `POST /api/recordings`.
+Metadata travels in the query string (`episodeId`, optional `cueIndex`, `startMs`, `endMs`,
+`durationMs`, `label`), because the body is the raw audio. The episode must exist. Format,
+empty-body, and range errors become `415`, `400`, and `400` respectively.
+
+`GET /api/recordings/:id/audio` sends the stored MIME type, `Cache-Control: private,
+no-store`, and `Accept-Ranges: bytes`. It handles ordinary and suffix byte ranges with a
+`206` response, or `416` for an unsatisfiable range. This lets the native audio controls
+seek inside a take. The default storage directory is `<dataDir>/recordings`; tests inject
+`AppOptions.recordingsDir` so they never write to the real data folder.
+
+There is no practiced-cue table, streak counter, or pronunciation score. A take is evidence
+that a line was practised, but Phase 5 deliberately stops at recording and A/B playback.
+
 ## Local Whisper transcription
 
 `apps/server/src/whisper.ts` manages explicit, asynchronous jobs. It never starts when an
@@ -350,12 +446,21 @@ All responses are JSON except `204` deletes. Errors are `{ "error": "..." }`.
 | POST   | `/api/episodes/:id/transcribe`| Start local Whisper; optional `language`           |
 | DELETE | `/api/episodes/:id/transcription` | Cancel the active local job                    |
 | PUT    | `/api/episodes/:id/progress`  | `{ positionMs, status? }`                          |
+| GET    | `/api/recordings`             | `episodeId`, optional `cueIndex`; list takes       |
+| POST   | `/api/recordings`             | Raw `audio/*` body plus metadata query params      |
+| GET    | `/api/recordings/:id/audio`   | Byte-range-capable local audio stream              |
+| DELETE | `/api/recordings/:id`         | Remove metadata and audio file                     |
 | GET    | `/api/home`                   | Stats, continue-listening, recent episodes         |
 
 Transcript imports accept `url` for a custom fetch, `text` plus optional `format`, and an
 optional `language`. The body limit is 6 MB so a 4 MB text payload fits after JSON
 escaping; the schema still caps pasted text at 4,000,000 characters. Oversized JSON
 bodies return 413.
+
+Recording uploads are the one non-JSON request body. The route's raw parser accepts
+`audio/*` up to 25 MB; metadata is validated from the query string with Zod. Unsupported
+audio MIME types return 415. The global payload-too-large handler names both the transcript
+and recording limits rather than assuming every 413 came from a transcript.
 
 New API routes must be declared before the `/api` 404 middleware. Unknown API routes return
 a JSON 404; non-API routes fall through to the SPA shell when static files are present.
@@ -389,7 +494,13 @@ a JSON 404; non-API routes fall through to the SPA shell when static files are p
   subscribes to player time inside the reader, computes the active cue with a binary
   search, and scrolls the transcript container rather than the page. A missing end time
   keeps the cue active until the next cue. Word clicks are handled by `openTranslation`,
-  which owns the panel open/resume refs independently of React render timing.
+  which owns the panel open/resume refs independently of React render timing. Timed cues
+  also render a practice button that opens the shadowing dialog with the next cue's start.
+- `components/ShadowingDialog.tsx` owns the cue loop, gap timer, microphone lifecycle,
+  pending take, local preview audio, and saved-take list. It always uses the shared player
+  actions for the original line, and its own `<audio>` only for take files. A close with an
+  unsaved take or active recording shows an inline discard confirmation rather than
+  silently losing audio.
 - `components/WordTranslationPanel.tsx` is portal-rendered and non-modal. It fetches the
   selected word from the local dictionary, renders definitions/type/IPA/Arabic/context,
   and saves the word to vocabulary. Its outside-click listener ignores transcript word
@@ -439,10 +550,12 @@ The layout is mobile-first. The desktop sidebar appears at `md` (768px); the epi
 switches to a two-column player/progress layout at `lg` (1024px). Mobile navigation uses
 short labels (“Library”, “Episodes”) so all four items fit at phone widths.
 
-Dictionary and Vocabulary are now real practice routes. Shadowing remains a disabled
-“Soon” item, not a clickable placeholder. Clickable transcript words use a dotted
-underline and a selected-word amber highlight; the translation panel floats above the
-player on desktop and becomes a near-full-width bottom card on phones.
+Dictionary and Vocabulary are practice routes; shadowing opens from any timed transcript
+cue. The practice dialog uses the existing modal, buttons, badges, and notices rather than
+a parallel component system. Clickable transcript words use a dotted underline and a
+selected-word amber highlight; the translation panel floats above the player on desktop
+and becomes a near-full-width bottom card on phones. Practice buttons sit at the end of
+each timed cue and use the same accent hover treatment as other quiet controls.
 
 ## Testing strategy
 
@@ -452,7 +565,8 @@ player on desktop and becomes a near-full-width bottom card on phones.
 - `transcript.test.ts` — VTT/SRT/JSON/plain text, voices, entities, timestamp prefixes,
   fallback detection, and unreadable input
 - `api.test.ts` — catalog, discovery, library CRUD, episodes, progress, transcript
-  load/cache/import/delete, HTML rejection, and error cases
+  load/cache/import/delete, shadowing recording upload/list/range/delete and podcast file
+  cleanup, HTML rejection, and error cases
 - `dictionary.test.ts` — direct lookup, form-to-lemma lookup, IPA/Arabic parsing, forms,
   attribution, empty queries, and a missing database, all against a temporary fixture DB
 - `vocabulary.test.ts` — dictionary enrichment, source deduplication, status/notes,
@@ -460,8 +574,8 @@ player on desktop and becomes a near-full-width bottom card on phones.
 - `http.test.ts` — public/private address policy, manual redirects, size limits
 
 Tests inject a fake `fetchText`; they never depend on a live publisher. A temp SQLite
-database is created per suite. Dictionary tests use their own tiny fixture and never touch
-the real 147 MB database.
+database is created per suite, and API tests also inject a temporary `recordingsDir`, so no
+test audio reaches the real data folder.
 
 Manual checks after changes:
 
@@ -484,12 +598,16 @@ Manual checks after changes:
    another word updates without resuming; X/Escape/outside click resumes from the same
    timestamp; initially paused → click and close remains paused. Save the word, then edit
    status and notes on Vocabulary and delete it.
-10. Transcribe a short real episode, watch the job progress, cancel once, then run it again.
+10. Open the practice button on a timed cue. Check play-from-cue, loop with each gap,
+    pause/stop, microphone denial, a recorded take, save, reload persistence, playback,
+    delete, and the unsaved-take close prompt. Delete a test podcast and confirm its
+    recording files are removed.
+11. Transcribe a short real episode, watch the job progress, cancel once, then run it again.
     Confirm the saved transcript badge says “Local Whisper”, cues seek the player, and no
     `podcast-plus-whisper-*` temp folder remains.
-11. Check the mini player across routes and the full player on the episode route.
-12. Check light/dark and a 390px-wide viewport, including the translation panel and
-    Vocabulary list.
+12. Check the mini player across routes and the full player on the episode route.
+13. Check light/dark and a 390px-wide viewport, including the translation panel,
+    Vocabulary list, and shadowing dialog.
 
 ## Common maintenance tasks
 
@@ -509,14 +627,27 @@ next server start runs it and increments `user_version`. Add tests for new behav
 
 Add the route in `app.ts` before the `/api` 404 handler. Validate input with Zod. Throw
 `HttpError` for expected statuses, or let the central error handler return 500 and log the
-unexpected error. Add API coverage in `api.test.ts`.
+unexpected error. Add API coverage in `api.test.ts`. A raw-audio route must declare its own
+`express.raw` parser and body limit before the handler; do not relax the global JSON parser.
+
+### Add or change a recording format
+
+Extend `MIME_EXTENSIONS` in `recordings.ts` and the browser preference list in
+`ShadowingDialog.tsx`, then add an API test that uploads that content type and one that
+rejects an unsupported type. Keep filenames generated by the server; never derive a path
+from a request field. The raw upload route stays `audio/*`, and `normalizeRecordingMime`
+remains the single allow-list shared by save and stream paths.
 
 ### Change the player
 
-Keep the single audio element. Avoid creating a second `<audio>` for a second screen; that
-would break resume and duplicate sound. Update progress through the existing `persist`
-helper so keepalive/page-hide behavior stays consistent. If you add a new seek entry point,
-use `playAt` rather than assigning `audio.currentTime` before metadata has loaded.
+Keep the single episode audio element. The shadowing dialog's preview `<audio>` is the one
+deliberate exception: it only plays local take files and never owns episode progress or
+resume state. Avoid adding a second episode player for a second screen; that would break
+resume and duplicate sound. Update progress through the existing `persist` helper so
+keepalive/page-hide behavior stays consistent. If you add a new seek entry point, use
+`playAt` rather than assigning `audio.currentTime` before metadata has loaded. Shadowing
+loops call `playAt` for the original line and keep their timers in the dialog, not in the
+global player.
 
 Any new playback entry point (button, shortcut, media key, or integration) must respect
 `translationLockRef` while the word panel is open. Do not work around the lock by calling
@@ -531,14 +662,15 @@ make `detectTranscriptFormat` recognize the format. Normalize every parser throu
 `normalizeCues`, then add parser and API tests. The UI consumes the same cue shape, so no
 schema change is needed unless the format adds new metadata.
 
-## Deliberate non-goals in Phase 4
+## Deliberate non-goals in Phase 5
 
 - Automatic transcription when an episode page opens
 - Cloud transcription, translation, or dictionary APIs
 - Scraping arbitrary HTML transcript pages
 - Offline audio downloads (temporary transcription audio is deleted)
 - Spaced-repetition scheduling or generated study sheets
-- Shadowing and recording
+- Pronunciation scoring, recording analysis, streaks, or practice-time analytics
+- Cloud sync or upload of shadowing takes
 - Editing or adding dictionary entries
 - OPML import/export
 - Android

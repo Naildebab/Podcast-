@@ -1,7 +1,7 @@
 {
   "name": "podcast-language-studio",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "A local-first podcast language-learning studio",
   "workspaces": [
     "apps/*"

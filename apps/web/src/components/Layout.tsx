@@ -1,7 +1,6 @@
 import { useEffect } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import { useTheme } from "../theme/ThemeContext";
-import { Badge } from "./Badge";
 import {
   BookIcon,
   CompassIcon,
@@ -9,7 +8,6 @@ import {
   HomeIcon,
   LibraryIcon,
   ListIcon,
-  MicIcon,
   MoonIcon,
   SettingsIcon,
   SparklesIcon,
@@ -107,13 +105,6 @@ export function Layout() {
             >
               <SparklesIcon size={19} /> Vocabulary
             </Link>
-            <span
-              aria-disabled="true"
-              className="flex cursor-not-allowed items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-muted/60"
-              title="Planned for Phase 5"
-            >
-              <MicIcon size={19} /> Shadowing <Badge tone="outline">Soon</Badge>
-            </span>
           </div>
         </nav>
 
@@ -123,7 +114,8 @@ export function Layout() {
               <HeadphonesIcon size={16} /> Local-first
             </div>
             <p className="mt-2 text-xs leading-relaxed text-muted">
-              Your library, notes, and playback positions stay in a local SQLite file.
+              Your library, notes, recordings, and playback positions stay on this
+              computer.
             </p>
           </div>
         </div>
@@ -226,7 +218,7 @@ export function Layout() {
         <main className="mx-auto w-full max-w-[1180px] px-4 pb-44 pt-6 sm:px-6 md:px-10 md:pt-10">
           <Outlet />
           <footer className="mt-16 flex flex-col items-start justify-between gap-2 border-t border-line pt-5 text-[0.68rem] text-muted sm:flex-row sm:items-center">
-            <span>Podcast Language Studio · Phase 4</span>
+            <span>Podcast Language Studio · Phase 5</span>
             <span>Local data. No accounts. No tracking.</span>
           </footer>
         </main>
