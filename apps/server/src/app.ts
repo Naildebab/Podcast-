@@ -6,6 +6,12 @@ import { z, ZodError } from "zod";
 import { catalogCategories, loadCatalog, searchCatalog } from "./catalog.js";
 import { dataDir } from "./config.js";
 import type { Db } from "./db.js";
+import {
+  DictionaryQueryError,
+  DictionaryUnavailableError,
+  dictionaryStatus,
+  lookupDictionary,
+} from "./dictionary.js";
 import { previewFeed, resolveFeedUrl } from "./discovery.js";
 import { type FetchText, realFetchText } from "./http.js";
 import {
@@ -29,7 +35,16 @@ import {
   getTranscript,
   saveTranscript,
   type StoredTranscript,
+  type TranscriptOrigin,
 } from "./transcripts.js";
+import {
+  cancelTranscription,
+  getTranscriptionJob,
+  startTranscription,
+  WhisperRequestError,
+  WhisperUnavailableError,
+  whisperStatus,
+} from "./whisper.js";
 
 export class HttpError extends Error {
   constructor(
@@ -68,6 +83,14 @@ const progressSchema = z.object({
 });
 
 const transcriptFormatSchema = z.enum(["vtt", "srt", "json", "text"]);
+
+const dictionaryQuerySchema = z.object({
+  word: z.string().trim().min(1, "Enter a word to look up.").max(120),
+});
+
+const transcribeSchema = z.object({
+  language: z.string().trim().min(2).max(20).optional(),
+});
 
 const transcriptImportSchema = z.object({
   source: z.enum(["feed", "url", "text"]).optional(),
@@ -140,7 +163,7 @@ function saveTranscriptOrThrow(
   episodeId: number,
   parsed: ReturnType<typeof parseTranscript>,
   sourceUrl: string | null,
-  origin: "feed" | "manual",
+  origin: TranscriptOrigin,
 ): StoredTranscript {
   try {
     return saveTranscript(db, episodeId, parsed, { sourceUrl, origin });
@@ -180,16 +203,38 @@ export function createApp(db: Db, options: AppOptions = {}): express.Express {
   app.use(express.json({ limit: "6mb" }));
 
   app.get("/api/health", (_req, res) => {
-    res.json({ ok: true, version: "0.2.0", phase: 2 });
+    res.json({ ok: true, version: "0.3.0", phase: 3 });
   });
 
   app.get("/api/meta", (_req, res) => {
     res.json({
-      version: "0.2.0",
-      phase: 2,
+      version: "0.3.0",
+      phase: 3,
       dataDir: dataDir(),
       stats: getStats(db),
     });
+  });
+
+  app.get("/api/resources", (_req, res) => {
+    res.json({
+      whisper: whisperStatus(),
+      dictionary: dictionaryStatus(),
+    });
+  });
+
+  // --- Local dictionary ---------------------------------------------------
+
+  app.get("/api/dictionary/lookup", (req, res) => {
+    const { word } = dictionaryQuerySchema.parse(req.query);
+    try {
+      res.json(lookupDictionary(word));
+    } catch (error) {
+      if (error instanceof DictionaryQueryError) throw new HttpError(400, error.message);
+      if (error instanceof DictionaryUnavailableError) {
+        throw new HttpError(503, error.message);
+      }
+      throw error;
+    }
   });
 
   // --- API-free discovery -------------------------------------------------
@@ -371,6 +416,46 @@ export function createApp(db: Db, options: AppOptions = {}): express.Express {
     if (!episode) throw new HttpError(404, "That episode could not be found.");
     deleteTranscript(db, episode.id);
     res.status(204).end();
+  });
+
+  // --- Local Whisper transcription ---------------------------------------
+
+  app.get("/api/episodes/:id/transcription", (req, res) => {
+    const episode = getEpisode(db, parseId(req.params.id));
+    if (!episode) throw new HttpError(404, "That episode could not be found.");
+    const status = whisperStatus();
+    res.json({
+      available: status.available,
+      reason: status.reason,
+      job: getTranscriptionJob(episode.id),
+    });
+  });
+
+  app.post("/api/episodes/:id/transcribe", (req, res) => {
+    const episode = getEpisode(db, parseId(req.params.id));
+    if (!episode) throw new HttpError(404, "That episode could not be found.");
+    const body = transcribeSchema.parse(req.body ?? {});
+
+    try {
+      const job = startTranscription(db, episode, { language: body.language });
+      res.status(202).json({ job });
+    } catch (error) {
+      if (error instanceof WhisperUnavailableError) {
+        throw new HttpError(503, error.message);
+      }
+      if (error instanceof WhisperRequestError) {
+        throw new HttpError(422, error.message);
+      }
+      throw error;
+    }
+  });
+
+  app.delete("/api/episodes/:id/transcription", (req, res) => {
+    const episode = getEpisode(db, parseId(req.params.id));
+    if (!episode) throw new HttpError(404, "That episode could not be found.");
+    const job = cancelTranscription(episode.id);
+    if (!job) throw new HttpError(404, "No local transcription is running for this episode.");
+    res.json({ job });
   });
 
   app.put("/api/episodes/:id/progress", (req, res) => {

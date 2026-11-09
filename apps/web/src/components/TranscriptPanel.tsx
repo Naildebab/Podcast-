@@ -9,7 +9,13 @@ import {
 import { api } from "../lib/api";
 import { formatDate, formatTime } from "../lib/format";
 import { useAsync } from "../lib/hooks";
-import type { Episode, Transcript, TranscriptCue, TranscriptFormat } from "../lib/types";
+import type {
+  Episode,
+  Transcript,
+  TranscriptCue,
+  TranscriptFormat,
+  TranscriptionJob,
+} from "../lib/types";
 import { usePlayerActions, usePlayerSnapshot, usePlayerTime } from "../player/PlayerContext";
 import { Badge } from "./Badge";
 import { Button } from "./Button";
@@ -19,6 +25,7 @@ import {
   BookIcon,
   ExternalIcon,
   LinkIcon,
+  MicIcon,
   RefreshIcon,
   SearchIcon,
   TrashIcon,
@@ -32,6 +39,27 @@ const FORMAT_LABELS: Record<TranscriptFormat, string> = {
 };
 
 const MAX_IMPORT_BYTES = 4 * 1024 * 1024;
+
+const ACTIVE_TRANSCRIPTION_STATES = new Set<TranscriptionJob["state"]>([
+  "queued",
+  "downloading",
+  "transcribing",
+  "saving",
+]);
+
+const TRANSCRIPTION_LABELS: Record<TranscriptionJob["state"], string> = {
+  queued: "Preparing",
+  downloading: "Downloading audio",
+  transcribing: "Transcribing on this computer",
+  saving: "Saving transcript",
+  completed: "Finished",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
+function transcriptionActive(job: TranscriptionJob | null): boolean {
+  return job !== null && ACTIVE_TRANSCRIPTION_STATES.has(job.state);
+}
 
 function findActiveCue(cues: TranscriptCue[], millis: number): number {
   let low = 0;
@@ -85,13 +113,82 @@ function HighlightedText({ text, query }: { text: string; query: string }) {
 
 export function TranscriptPanel({ episode }: { episode: Episode }) {
   const request = useAsync(() => api.transcript(episode.id), [episode.id]);
-  const [busy, setBusy] = useState<"feed" | "reload" | "delete" | null>(null);
+  const [busy, setBusy] = useState<"feed" | "reload" | "delete" | "transcribe" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [transcribeConfirmOpen, setTranscribeConfirmOpen] = useState(false);
+  const [job, setJob] = useState<TranscriptionJob | null>(null);
+  const [transcribeAvailable, setTranscribeAvailable] = useState(false);
+  const [transcribeChecked, setTranscribeChecked] = useState(false);
+  const [transcribeReason, setTranscribeReason] = useState<string | null>(null);
 
   const transcript = request.data?.transcript ?? null;
+
+  useEffect(() => {
+    let active = true;
+    setJob(null);
+    setTranscribeChecked(false);
+    setTranscribeAvailable(false);
+    setTranscribeReason(null);
+    api
+      .transcriptionStatus(episode.id)
+      .then((status) => {
+        if (!active) return;
+        setTranscribeAvailable(status.available);
+        setTranscribeReason(status.reason);
+        setTranscribeChecked(true);
+        setJob(status.job);
+      })
+      .catch(() => {
+        if (active) {
+          setTranscribeAvailable(false);
+          setTranscribeChecked(true);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [episode.id]);
+
+  const reloadTranscriptRequest = request.reload;
+  useEffect(() => {
+    if (!transcriptionActive(job)) return;
+
+    let cancelled = false;
+    let timer: number | undefined;
+
+    async function poll() {
+      try {
+        const status = await api.transcriptionStatus(episode.id);
+        if (cancelled) return;
+        setTranscribeAvailable(status.available);
+        setTranscribeReason(status.reason);
+        setJob(status.job);
+        if (status.job && transcriptionActive(status.job)) {
+          timer = window.setTimeout(poll, 2_000);
+        } else if (status.job?.state === "completed") {
+          reloadTranscriptRequest();
+          setNotice("Local transcription finished. The timestamped transcript was saved.");
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setActionError(
+            error instanceof Error
+              ? error.message
+              : "The local transcription status could not be checked.",
+          );
+        }
+      }
+    }
+
+    timer = window.setTimeout(poll, 2_000);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [episode.id, job?.id, job?.state, reloadTranscriptRequest]);
 
   async function loadFromFeed() {
     setBusy("feed");
@@ -162,6 +259,43 @@ export function TranscriptPanel({ episode }: { episode: Episode }) {
     }
   }
 
+  async function transcribeLocally() {
+    setBusy("transcribe");
+    setActionError(null);
+    setNotice(null);
+    setTranscribeConfirmOpen(false);
+    try {
+      const result = await api.startTranscription(episode.id);
+      setJob(result.job);
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "The local transcription could not start.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function requestTranscription() {
+    if (transcript) {
+      setTranscribeConfirmOpen(true);
+      return;
+    }
+    void transcribeLocally();
+  }
+
+  async function cancelTranscription() {
+    setActionError(null);
+    try {
+      const result = await api.cancelTranscription(episode.id);
+      setJob(result.job);
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "The transcription could not be cancelled.",
+      );
+    }
+  }
+
   return (
     <section className="animate-rise delay-3 rounded-3xl border border-line bg-surface p-5 sm:p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -170,7 +304,7 @@ export function TranscriptPanel({ episode }: { episode: Episode }) {
           <div>
             <h2 className="font-serif text-2xl text-fg">Transcript</h2>
             <p className="mt-0.5 text-xs text-muted">
-              Read along with the audio, or import a transcript you already have.
+              Read along, transcribe locally, or import a transcript you already have.
             </p>
           </div>
         </div>
@@ -180,12 +314,14 @@ export function TranscriptPanel({ episode }: { episode: Episode }) {
             <Badge tone={transcript.timed ? "pine" : "outline"}>
               {transcript.timed ? "Line-synced" : "Untimed"}
             </Badge>
-            <Badge tone="outline">
+            <Badge tone={transcript.origin === "whisper" ? "pine" : "outline"}>
               {transcript.origin === "feed"
                 ? "From feed"
-                : transcript.sourceUrl
-                  ? "Imported URL"
-                  : "Pasted locally"}
+                : transcript.origin === "whisper"
+                  ? "Local Whisper"
+                  : transcript.sourceUrl
+                    ? "Imported URL"
+                    : "Pasted locally"}
             </Badge>
           </div>
         ) : null}
@@ -201,6 +337,7 @@ export function TranscriptPanel({ episode }: { episode: Episode }) {
           {actionError}
         </Notice>
       ) : null}
+      {job ? <TranscriptionProgress job={job} onCancel={cancelTranscription} /> : null}
 
       {request.loading && !request.data ? (
         <div className="mt-5 space-y-2">
@@ -221,16 +358,22 @@ export function TranscriptPanel({ episode }: { episode: Episode }) {
           transcript={transcript}
           episode={episode}
           busy={busy}
+          transcribeAvailable={transcribeAvailable}
           onReload={reloadTranscript}
           onImport={() => setImportOpen(true)}
           onRemove={() => setConfirmOpen(true)}
+          onTranscribe={requestTranscription}
         />
       ) : (
         <TranscriptEmpty
           episode={episode}
           busy={busy}
+          transcribeAvailable={transcribeAvailable}
+          transcribeChecked={transcribeChecked}
+          transcribeReason={transcribeReason}
           onLoad={loadFromFeed}
           onImport={() => setImportOpen(true)}
+          onTranscribe={requestTranscription}
         />
       )}
 
@@ -254,20 +397,81 @@ export function TranscriptPanel({ episode }: { episode: Episode }) {
         onConfirm={removeTranscript}
         onClose={() => setConfirmOpen(false)}
       />
+
+      <ConfirmDialog
+        open={transcribeConfirmOpen}
+        title="Replace this transcript with a local transcription?"
+        message={
+          <>
+            Whisper will download this episode's audio temporarily, transcribe it on this
+            computer, and replace the saved transcript for this episode. The audio is deleted
+            after transcription.
+          </>
+        }
+        confirmLabel="Transcribe locally"
+        busy={busy === "transcribe"}
+        onConfirm={transcribeLocally}
+        onClose={() => setTranscribeConfirmOpen(false)}
+      />
     </section>
+  );
+}
+
+function TranscriptionProgress({
+  job,
+  onCancel,
+}: {
+  job: TranscriptionJob;
+  onCancel: () => void;
+}) {
+  const active = transcriptionActive(job);
+  const tone = job.state === "failed" ? "error" : job.state === "completed" ? "success" : "info";
+
+  return (
+    <Notice tone={tone} className="mt-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span>
+          <span className="font-semibold">Local Whisper:</span>{" "}
+          {TRANSCRIPTION_LABELS[job.state]}
+          {job.state === "transcribing" ? " — this can take several minutes on CPU." : null}
+        </span>
+        {active ? (
+          <Button variant="secondary" size="sm" onClick={onCancel}>
+            Cancel
+          </Button>
+        ) : null}
+      </div>
+      {job.state === "completed" ? (
+        <p className="mt-1 text-xs">
+          Saved {job.cueCount ?? 0} timestamped {job.cueCount === 1 ? "line" : "lines"} locally
+          using {job.model}.
+        </p>
+      ) : null}
+      {job.state === "failed" && job.error ? (
+        <p className="mt-1 text-xs">{job.error}</p>
+      ) : null}
+    </Notice>
   );
 }
 
 function TranscriptEmpty({
   episode,
   busy,
+  transcribeAvailable,
+  transcribeChecked,
+  transcribeReason,
   onLoad,
   onImport,
+  onTranscribe,
 }: {
   episode: Episode;
-  busy: "feed" | "reload" | "delete" | null;
+  busy: "feed" | "reload" | "delete" | "transcribe" | null;
+  transcribeAvailable: boolean;
+  transcribeChecked: boolean;
+  transcribeReason: string | null;
   onLoad: () => void;
   onImport: () => void;
+  onTranscribe: () => void;
 }) {
   return (
     <div className="mt-5 rounded-2xl border border-dashed border-line bg-bg p-5">
@@ -284,7 +488,7 @@ function TranscriptEmpty({
           <p className="mt-1 text-xs leading-relaxed text-muted">
             {episode.transcriptUrl
               ? "Load it once from the publisher. It is parsed and stored in your local database, so the next visit is instant and does not contact the publisher again."
-              : "You can paste a transcript or choose a VTT, SRT, JSON, or plain-text file. It stays on this computer."}
+              : "Use the local Whisper install to transcribe this episode, or paste a transcript you already have. Everything stays on this computer."}
           </p>
         </div>
       </div>
@@ -295,8 +499,17 @@ function TranscriptEmpty({
             <RefreshIcon size={15} /> Load transcript
           </Button>
         ) : null}
+        {transcribeAvailable ? (
+          <Button
+            variant={episode.transcriptUrl ? "secondary" : "primary"}
+            onClick={onTranscribe}
+            loading={busy === "transcribe"}
+          >
+            <MicIcon size={15} /> Transcribe locally
+          </Button>
+        ) : null}
         <Button
-          variant={episode.transcriptUrl ? "secondary" : "primary"}
+          variant={episode.transcriptUrl || transcribeAvailable ? "secondary" : "primary"}
           onClick={onImport}
         >
           Import transcript
@@ -318,6 +531,11 @@ function TranscriptEmpty({
         sometimes publish an HTML transcript page instead; those need to be pasted in
         manually.
       </p>
+      {transcribeChecked && !transcribeAvailable ? (
+        <p className="mt-2 text-[0.65rem] leading-relaxed text-muted">
+          Local Whisper is unavailable. {transcribeReason}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -326,16 +544,20 @@ function TranscriptReader({
   transcript,
   episode,
   busy,
+  transcribeAvailable,
   onReload,
   onImport,
   onRemove,
+  onTranscribe,
 }: {
   transcript: Transcript;
   episode: Episode;
-  busy: "feed" | "reload" | "delete" | null;
+  busy: "feed" | "reload" | "delete" | "transcribe" | null;
+  transcribeAvailable: boolean;
   onReload: () => void;
   onImport: () => void;
   onRemove: () => void;
+  onTranscribe: () => void;
 }) {
   const player = usePlayerSnapshot();
   const time = usePlayerTime();
@@ -454,6 +676,19 @@ function TranscriptReader({
         >
           Import
         </button>
+        {transcribeAvailable ? (
+          <>
+            <span aria-hidden="true">·</span>
+            <button
+              type="button"
+              onClick={onTranscribe}
+              disabled={busy === "transcribe"}
+              className="inline-flex items-center gap-1 font-semibold text-pine hover:underline disabled:pointer-events-none disabled:opacity-40"
+            >
+              <MicIcon size={12} /> Transcribe locally
+            </button>
+          </>
+        ) : null}
         <span aria-hidden="true">·</span>
         <button
           type="button"

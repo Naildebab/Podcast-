@@ -1,5 +1,6 @@
 import type {
   CatalogResponse,
+  DictionaryResult,
   Episode,
   EpisodeListResponse,
   HomeResponse,
@@ -8,8 +9,11 @@ import type {
   PodcastResponse,
   ProgressStatus,
   ResolveResponse,
+  ResourcesResponse,
   Transcript,
   TranscriptFormat,
+  TranscriptionJob,
+  TranscriptionStatus,
 } from "./types";
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -54,6 +58,25 @@ export const api = {
   home: () => request<HomeResponse>("/api/home"),
 
   meta: () => request<MetaResponse>("/api/meta"),
+
+  resources: () => request<ResourcesResponse>("/api/resources"),
+
+  dictionary: (word: string) =>
+    request<DictionaryResult>(`/api/dictionary/lookup${queryString({ word })}`),
+
+  transcriptionStatus: (episodeId: number) =>
+    request<TranscriptionStatus>(`/api/episodes/${episodeId}/transcription`),
+
+  startTranscription: (episodeId: number, language?: string) =>
+    request<{ job: TranscriptionJob }>(`/api/episodes/${episodeId}/transcribe`, {
+      method: "POST",
+      body: JSON.stringify(language ? { language } : {}),
+    }),
+
+  cancelTranscription: (episodeId: number) =>
+    request<{ job: TranscriptionJob }>(`/api/episodes/${episodeId}/transcription`, {
+      method: "DELETE",
+    }),
 
   catalog: (params: { q?: string; category?: string; level?: string } = {}) =>
     request<CatalogResponse>(`/api/discovery/catalog${queryString(params)}`),

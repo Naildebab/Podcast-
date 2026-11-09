@@ -1,4 +1,6 @@
 import dns from "node:dns/promises";
+import fs from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import net from "node:net";
 
 export interface FetchedText {
@@ -17,6 +19,23 @@ export interface FetchOptions {
 }
 
 export type FetchText = (url: string, options?: FetchOptions) => Promise<FetchedText>;
+
+export interface DownloadResult {
+  finalUrl: string;
+  contentType: string;
+  bytes: number;
+}
+
+export interface DownloadOptions extends FetchOptions {
+  /** Optional caller cancellation, combined with the timeout. */
+  signal?: AbortSignal;
+}
+
+export type DownloadFile = (
+  url: string,
+  destination: string,
+  options?: DownloadOptions,
+) => Promise<DownloadResult>;
 
 const MAX_BYTES = 20 * 1024 * 1024;
 const TIMEOUT_MS = 20_000;
@@ -149,4 +168,94 @@ export const realFetchText: FetchText = async (
   }
 
   throw new Error("That address redirected too many times.");
+};
+
+function withTimeout(timeoutMs: number, external?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return external ? AbortSignal.any([external, timeout]) : timeout;
+}
+
+/**
+ * Download a binary resource to a local temporary file. The same SSRF checks
+ * and redirect validation as realFetchText apply. The file is removed by the
+ * caller after it has been used.
+ */
+export const downloadToFile: DownloadFile = async (
+  input: string,
+  destination: string,
+  options: DownloadOptions = {},
+): Promise<DownloadResult> => {
+  const maxBytes = options.maxBytes ?? MAX_BYTES;
+  const timeoutMs = options.timeoutMs ?? TIMEOUT_MS;
+  const accept = options.accept ?? "audio/*, video/mp4, application/octet-stream, */*";
+  let current = await assertPublicUrl(input);
+  let handle: FileHandle | undefined;
+
+  try {
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+      const response = await fetch(current, {
+        signal: withTimeout(timeoutMs, options.signal),
+        redirect: "manual",
+        headers: {
+          "User-Agent": "PodcastLanguageStudio/0.3 (+local personal podcast app)",
+          Accept: accept,
+        },
+      });
+
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        await response.body?.cancel().catch(() => undefined);
+        if (!location) throw new Error("The server redirected without a destination.");
+        if (hop === MAX_REDIRECTS) throw new Error("That address redirected too many times.");
+        current = await assertPublicUrl(new URL(location, current).href);
+        continue;
+      }
+
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error(`The server answered with an error (HTTP ${response.status}).`);
+      }
+
+      const contentType = response.headers.get("content-type") ?? "";
+      if (contentType.toLowerCase().includes("text/html")) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error("That audio address returned a web page instead of an audio file.");
+      }
+
+      const declaredLength = Number(response.headers.get("content-length") ?? 0);
+      if (declaredLength > maxBytes) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error("That audio file is too large to use safely.");
+      }
+
+      const body = response.body;
+      if (!body) throw new Error("The server returned an empty audio response.");
+
+      handle = await fs.promises.open(destination, "w");
+      const reader = body.getReader();
+      let bytes = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        bytes += value.byteLength;
+        if (bytes > maxBytes) {
+          await reader.cancel().catch(() => undefined);
+          throw new Error("That audio file is too large to use safely.");
+        }
+        await handle.write(value);
+      }
+
+      await handle.close();
+      handle = undefined;
+      return { finalUrl: current.href, contentType, bytes };
+    }
+
+    throw new Error("That address redirected too many times.");
+  } catch (error) {
+    if (handle) await handle.close().catch(() => undefined);
+    await fs.promises.unlink(destination).catch(() => undefined);
+    throw error;
+  }
 };

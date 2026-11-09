@@ -1,4 +1,4 @@
-import { MonitorIcon, MoonIcon, SunIcon } from "../components/Icons";
+import { BookIcon, MicIcon, MonitorIcon, MoonIcon, SunIcon } from "../components/Icons";
 import { Badge } from "../components/Badge";
 import { ErrorPanel, Notice, Skeleton } from "../components/Notice";
 import { api } from "../lib/api";
@@ -24,6 +24,7 @@ export function Settings() {
   useDocumentTitle("Settings");
   const { theme, setTheme } = useTheme();
   const meta = useAsync(() => api.meta(), []);
+  const resources = useAsync(() => api.resources(), []);
   const player = usePlayerSnapshot();
   const actions = usePlayerActions();
 
@@ -131,7 +132,8 @@ export function Settings() {
           <>
             <p className="mt-3 text-xs leading-relaxed text-muted">
               The SQLite database, subscriptions, and playback positions are stored in this
-              folder. Audio is streamed from the publisher and is not downloaded.
+              folder. Audio is normally streamed from the publisher; local transcription
+              downloads a temporary copy and deletes it when the job finishes.
             </p>
             <code className="mt-3 block break-all rounded-2xl border border-line bg-bg px-4 py-3 text-xs text-fg">
               {meta.data.dataDir}
@@ -159,6 +161,100 @@ export function Settings() {
         ) : null}
       </section>
 
+      <section className="animate-rise delay-2 rounded-3xl border border-line bg-surface p-5 sm:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="eyebrow">Local language tools</p>
+            <h2 className="mt-1 font-serif text-2xl text-fg">Resources already on this PC</h2>
+          </div>
+          <Badge tone="pine">Borrowed, not copied</Badge>
+        </div>
+        <p className="mt-3 text-xs leading-relaxed text-muted">
+          The dictionary is opened read-only and Whisper is run from its existing virtual
+          environment. No model weights or dictionary files are duplicated in this project.
+        </p>
+
+        {resources.error ? (
+          <ErrorPanel
+            message={resources.error}
+            onRetry={resources.reload}
+            className="mt-4"
+          />
+        ) : null}
+        {resources.loading && !resources.data ? (
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <Skeleton className="h-40 w-full" />
+            <Skeleton className="h-40 w-full" />
+          </div>
+        ) : resources.data ? (
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-2xl border border-line bg-bg p-4">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <BookIcon size={18} className="text-accent" />
+                  <h3 className="font-serif text-lg text-fg">Wiktionary database</h3>
+                </div>
+                <Badge tone={resources.data.dictionary.available ? "pine" : "outline"}>
+                  {resources.data.dictionary.available ? "Available" : "Unavailable"}
+                </Badge>
+              </div>
+              {resources.data.dictionary.available ? (
+                <>
+                  <p className="mt-2 text-xs leading-relaxed text-muted">
+                    {resources.data.dictionary.entries?.toLocaleString()} entries ·{" "}
+                    {resources.data.dictionary.forms?.toLocaleString()} forms ·{" "}
+                    {resources.data.dictionary.license}
+                  </p>
+                  <code className="mt-2 block break-all rounded-xl bg-surface-2 px-3 py-2 text-[0.65rem] text-fg">
+                    {resources.data.dictionary.path}
+                  </code>
+                </>
+              ) : (
+                <p className="mt-2 text-xs leading-relaxed text-danger">
+                  {resources.data.dictionary.error}
+                </p>
+              )}
+              <p className="mt-2 text-[0.65rem] text-muted">
+                Configure with <code>PODCAST_DICTIONARY_DB</code>.
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-line bg-bg p-4">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <MicIcon size={18} className="text-accent" />
+                  <h3 className="font-serif text-lg text-fg">OpenAI Whisper</h3>
+                </div>
+                <Badge tone={resources.data.whisper.available ? "pine" : "outline"}>
+                  {resources.data.whisper.available ? "Available" : "Unavailable"}
+                </Badge>
+              </div>
+              <p className="mt-2 text-xs leading-relaxed text-muted">
+                {resources.data.whisper.engine} · model {resources.data.whisper.model} ·{" "}
+                {resources.data.whisper.device}
+              </p>
+              <code className="mt-2 block break-all rounded-xl bg-surface-2 px-3 py-2 text-[0.65rem] text-fg">
+                {resources.data.whisper.binary}
+              </code>
+              {resources.data.whisper.available ? (
+                <p className="mt-2 text-[0.65rem] text-muted">
+                  Model cached at{" "}
+                  <code className="break-all">{resources.data.whisper.modelPath}</code>.
+                </p>
+              ) : (
+                <p className="mt-2 text-xs leading-relaxed text-danger">
+                  {resources.data.whisper.reason}
+                </p>
+              )}
+              <p className="mt-2 text-[0.65rem] text-muted">
+                Configure with <code>PODCAST_WHISPER_BIN</code>,{" "}
+                <code>PODCAST_WHISPER_MODEL</code>, and <code>PODCAST_WHISPER_MODEL_DIR</code>.
+              </p>
+            </div>
+          </div>
+        ) : null}
+      </section>
+
       <section className="animate-rise delay-3 rounded-3xl border border-line bg-surface p-5 sm:p-6">
         <p className="eyebrow">Roadmap</p>
         <h2 className="mt-1 font-serif text-2xl text-fg">What is next</h2>
@@ -178,11 +274,17 @@ export function Settings() {
             },
             {
               phase: "Phase 3",
+              title: "Local tools",
+              body: "Read the local Wiktionary database and transcribe episodes with the existing Whisper install.",
+              done: true,
+            },
+            {
+              phase: "Phase 4",
               title: "Vocabulary",
               body: "Select words, save definitions, and turn episodes into study sheets.",
             },
             {
-              phase: "Phase 4",
+              phase: "Phase 5",
               title: "Shadowing",
               body: "Loop phrases, record your voice locally, and track practice time.",
             },
@@ -205,7 +307,7 @@ export function Settings() {
           ))}
         </div>
         <Notice className="mt-4">
-          Android is a later phase. Phase 2 is still a local web app; no mobile build has
+          Android is a later phase. Phase 3 is still a local web app; no mobile build has
           been started.
         </Notice>
       </section>

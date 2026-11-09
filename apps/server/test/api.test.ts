@@ -109,7 +109,7 @@ describe("health and metadata", () => {
   it("reports that the local server is ready", async () => {
     const response = await api("/api/health");
     expect(response.status).toBe(200);
-    expect(response.body).toMatchObject({ ok: true, phase: 2 });
+    expect(response.body).toMatchObject({ ok: true, phase: 3 });
   });
 });
 

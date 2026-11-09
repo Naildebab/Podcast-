@@ -1,6 +1,6 @@
 # Development notes
 
-This document records the architecture and the decisions behind Phase 2. It is meant for
+This document records the architecture and the decisions behind Phase 3. It is meant for
 whoever maintains the project next — including future me.
 
 ## Stack
@@ -51,7 +51,8 @@ message, so the API can run alone during development.
 
 The folder is created on demand. The database is `app.db` inside it. WAL mode and foreign
 keys are enabled on every connection. The old prototype directory
-(`~/.local/share/podcast-language-studio`) is never read or written.
+(`~/.local/share/podcast-language-studio`) is used only as the default location of the
+borrowed, read-only dictionary database; no other file there is read or written.
 
 ### Schema
 
@@ -70,7 +71,8 @@ keys are enabled on every connection. The old prototype directory
 `transcripts`
 
 - one row per cached episode transcript: `episode_id` primary key, `source_url`, `format`,
-  `origin` (`feed` or `manual`), `language`, `timed`, `cue_count`, `imported_at`
+  `origin` (`feed`, `manual`, or `whisper`), `language`, `timed`, `cue_count`, `imported_at`
+- migration 3 recreates this table with the extra `whisper` origin while preserving rows
 - cascade delete when an episode or podcast is removed
 
 `transcript_cues`
@@ -166,6 +168,58 @@ Times are stored as integer milliseconds with nullable starts. Nullable starts l
 text use the same table as timed subtitles. An end time is kept only when it is positive
 and later than the start. The UI treats a missing end as “active until the next cue”.
 
+## Local dictionary
+
+`apps/server/src/dictionary.ts` borrows the existing Wiktextract database instead of
+building or copying one. The default path is
+`~/.local/share/podcast-language-studio/dictionary.db`; `PODCAST_DICTIONARY_DB` overrides
+it.
+
+- `better-sqlite3` opens the file with `{ readonly: true, fileMustExist: true }` and sets
+  `PRAGMA query_only = ON`. The app has no write path for this database.
+- The connection is cached per process and closed on shutdown.
+- `lookupDictionary` normalizes the query (Unicode NFKC, lowercase, apostrophe cleanup,
+  internal spaces) and first looks for direct matches by `entries.word_lc`.
+- If there is no direct entry, it resolves inflected forms through the `forms` table
+  (`form_lc` to `lemma_lc`) and loads the lemma entries. The response includes both the
+  lemma names and all available forms, capped at 200 for display.
+- Definitions and Arabic translations are stored as JSON arrays in the source database and
+  are parsed defensively. Invalid JSON becomes an empty list, not a crash.
+- `GET /api/dictionary/lookup` returns `400` for an empty query and `503` when the file is
+  missing. Source, license, and kaikki.org attribution travel with every result.
+- `GET /api/resources` reports availability and counts without exposing dictionary contents.
+
+The real database has 1,165,874 entries and 579,157 forms and uses `journal_mode=delete`.
+Read-only access works without changing the source file or creating a second copy.
+
+## Local Whisper transcription
+
+`apps/server/src/whisper.ts` manages explicit, asynchronous jobs. It never starts when an
+episode page opens.
+
+1. `POST /api/episodes/:id/transcribe` checks the executable and cached model first. Missing
+   resources return `503`; an English-only model with a non-English language returns `422`.
+2. The job downloads the episode audio through `downloadToFile` in `http.ts` to a unique
+   directory under the OS temp folder. The same SSRF checks and redirect validation as feed
+   fetching apply. Audio is capped at 250 MB and the download times out after five minutes
+   by default; HTML responses are rejected.
+3. The server spawns the configured Whisper executable with `--device`, `--task
+   transcribe`, `--output_format vtt`, `--output_dir`, `--threads`, and `--fp16 False` on
+   CPU. It never lets Whisper download a model: the model file is checked before spawning,
+   and `--model_dir` points at the existing cache.
+4. The VTT output is read through the existing `parseTranscript` path, then saved with
+   origin `whisper` through `saveTranscript`. The temporary folder is removed in a `finally`
+   block after success, failure, cancellation, or timeout.
+5. Status lives in an in-memory map keyed by episode. The UI polls every two seconds.
+   `DELETE /api/episodes/:id/transcription` aborts the download or sends `SIGTERM` to the
+   child. A server restart loses job state, but completed transcripts remain in SQLite.
+6. Only one job per episode can run. Starting another episode is allowed; starting the same
+   episode while it is active returns the existing job instead of spawning a duplicate.
+
+The process timeout defaults to one hour. `PODCAST_WHISPER_THREADS` defaults to 4 so a
+transcription does not consume every core on a modest machine. `base.en` is English-only;
+multilingual use requires a cached multilingual model and the matching environment vars.
+
 ## Discovery without an API
 
 The app intentionally avoids paid podcast directories and provider keys.
@@ -204,6 +258,9 @@ network. `http.ts` therefore:
   actual body).
 - Times out after 20 seconds.
 - Rejects non-success statuses with a readable error.
+- `downloadToFile` applies the same checks for temporary transcription audio, with its own
+  size cap and timeout and caller cancellation. It rejects HTML responses, writes to a temp
+  file, and cleans up on failure.
 
 A DNS-rebinding race is still theoretically possible between the check and the connection.
 The server binds to localhost by default and the app is single-user; this is a deliberate
@@ -221,6 +278,8 @@ All responses are JSON except `204` deletes. Errors are `{ "error": "..." }`.
 | ------ | ----------------------------- | -------------------------------------------------- |
 | GET    | `/api/health`                 | Version and phase                                  |
 | GET    | `/api/meta`                   | Data directory and stats                           |
+| GET    | `/api/resources`              | Local Whisper and dictionary availability          |
+| GET    | `/api/dictionary/lookup`      | `word`; read-only dictionary lookup                |
 | GET    | `/api/discovery/catalog`      | `q`, `category`, `level`; returns `inLibrary`      |
 | POST   | `/api/discovery/resolve`      | `{ url }`; preview without saving                  |
 | GET    | `/api/podcasts`               | Saved podcasts                                     |
@@ -233,6 +292,9 @@ All responses are JSON except `204` deletes. Errors are `{ "error": "..." }`.
 | GET    | `/api/episodes/:id/transcript`| Cached transcript or `{ transcript: null }`        |
 | POST   | `/api/episodes/:id/transcript`| `{ source: "feed" \| "url" \| "text", ... }`       |
 | DELETE | `/api/episodes/:id/transcript`| Remove transcript and cues                         |
+| GET    | `/api/episodes/:id/transcription` | Current local Whisper job                      |
+| POST   | `/api/episodes/:id/transcribe`| Start local Whisper; optional `language`           |
+| DELETE | `/api/episodes/:id/transcription` | Cancel the active local job                    |
 | PUT    | `/api/episodes/:id/progress`  | `{ positionMs, status? }`                          |
 | GET    | `/api/home`                   | Stats, continue-listening, recent episodes         |
 
@@ -267,10 +329,17 @@ a JSON 404; non-API routes fall through to the SPA shell when static files are p
   - `playAt(episode, seconds)`, which starts a new episode at a transcript cue without
     racing metadata loading, or seeks and resumes the current episode
 - `components/TranscriptPanel.tsx` owns the local transcript request, import modal,
-  reload/remove controls, search, follow toggle, and cue list. It only subscribes to player
-  time inside the reader, computes the active cue with a binary search, and scrolls the
-  transcript container rather than the page. A missing end time keeps the cue active until
-  the next cue.
+  reload/remove controls, search, follow toggle, cue list, and local Whisper controls. It
+  checks `/transcription`, polls active jobs every two seconds, shows a cancellable
+  progress notice, and reloads the transcript when a job completes. It only subscribes to
+  player time inside the reader, computes the active cue with a binary search, and scrolls
+  the transcript container rather than the page. A missing end time keeps the cue active
+  until the next cue.
+- `pages/Dictionary.tsx` provides the search form, suggested words, per-entry definitions,
+  IPA, Arabic translations, forms, and source/license attribution. It reads only through
+  `lib/api.ts`; there is no client-side dictionary file.
+- Settings uses the same `/api/resources` response as the Dictionary page to report missing
+  resources, paths, counts, and environment variables.
 - The mini player hides itself on the page of the episode it is playing, so it does not
   duplicate or overlap the full player. On desktop it starts to the right of the sidebar.
 - `theme/ThemeContext.tsx` stores `theme` as `light`, `dark`, or `system`; an inline script
@@ -304,7 +373,8 @@ The layout is mobile-first. The desktop sidebar appears at `md` (768px); the epi
 switches to a two-column player/progress layout at `lg` (1024px). Mobile navigation uses
 short labels (“Library”, “Episodes”) so all four items fit at phone widths.
 
-Planned practice areas are rendered as disabled “Soon” items, not clickable placeholders.
+Dictionary is now a real practice route. Vocabulary and shadowing remain disabled “Soon”
+items, not clickable placeholders.
 
 ## Testing strategy
 
@@ -315,10 +385,13 @@ Planned practice areas are rendered as disabled “Soon” items, not clickable 
   fallback detection, and unreadable input
 - `api.test.ts` — catalog, discovery, library CRUD, episodes, progress, transcript
   load/cache/import/delete, HTML rejection, and error cases
+- `dictionary.test.ts` — direct lookup, form-to-lemma lookup, IPA/Arabic parsing, forms,
+  attribution, empty queries, and a missing database, all against a temporary fixture DB
 - `http.test.ts` — public/private address policy, manual redirects, size limits
 
 Tests inject a fake `fetchText`; they never depend on a live publisher. A temp SQLite
-database is created per suite.
+database is created per suite. Dictionary tests use their own tiny fixture and never touch
+the real 147 MB database.
 
 Manual checks after changes:
 
@@ -331,8 +404,16 @@ Manual checks after changes:
    transcript, click a cue, confirm the active line follows playback, search the
    transcript, reload it, and remove the local copy.
 6. Import a pasted VTT/SRT/JSON/plain-text file for an episode without a feed transcript.
-7. Check the mini player across routes and the full player on the episode route.
-8. Check light/dark and a 390px-wide viewport.
+7. Open Settings and confirm Whisper and the dictionary show as available with the expected
+   paths. Temporarily point `PODCAST_DICTIONARY_DB` at a missing path to confirm the 503 and
+   “Unavailable” state are graceful.
+8. Look up `podcast`, `running`, and `better` in Dictionary. Confirm definitions, IPA, forms,
+   Arabic where present, and the CC BY-SA attribution.
+9. Transcribe a short real episode, watch the job progress, cancel once, then run it again.
+   Confirm the saved transcript badge says “Local Whisper”, cues seek the player, and no
+   `podcast-plus-whisper-*` temp folder remains.
+10. Check the mini player across routes and the full player on the episode route.
+11. Check light/dark and a 390px-wide viewport.
 
 ## Common maintenance tasks
 
@@ -368,13 +449,14 @@ make `detectTranscriptFormat` recognize the format. Normalize every parser throu
 `normalizeCues`, then add parser and API tests. The UI consumes the same cue shape, so no
 schema change is needed unless the format adds new metadata.
 
-## Deliberate non-goals in Phase 2
+## Deliberate non-goals in Phase 3
 
-- Automatic speech-to-text transcription
-- Translation
+- Automatic transcription when an episode page opens
+- Cloud transcription, translation, or dictionary APIs
 - Scraping arbitrary HTML transcript pages
-- Offline audio downloads (audio is streamed)
+- Offline audio downloads (temporary transcription audio is deleted)
 - Vocabulary, shadowing, and recording
+- Editing or adding dictionary entries
 - OPML import/export
 - Android
 - A hosted directory API

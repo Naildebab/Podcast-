@@ -37,7 +37,7 @@ export interface Episode {
 }
 
 export type TranscriptFormat = "vtt" | "srt" | "json" | "text";
-export type TranscriptOrigin = "feed" | "manual";
+export type TranscriptOrigin = "feed" | "manual" | "whisper";
 
 export interface TranscriptCue {
   index: number;
@@ -135,6 +135,87 @@ export interface MetaResponse {
   phase: number;
   dataDir: string;
   stats: Stats;
+}
+
+export interface WhisperStatus {
+  available: boolean;
+  engine: string;
+  binary: string;
+  binaryFound: boolean;
+  model: string;
+  modelPath: string;
+  modelCached: boolean;
+  device: string;
+  language: string;
+  reason: string | null;
+}
+
+export interface DictionaryStatus {
+  available: boolean;
+  path: string;
+  entries: number | null;
+  forms: number | null;
+  source: string | null;
+  license: string | null;
+  error: string | null;
+}
+
+export interface ResourcesResponse {
+  whisper: WhisperStatus;
+  dictionary: DictionaryStatus;
+}
+
+export interface DictionaryEntry {
+  id: number;
+  word: string;
+  pos: string;
+  ipa: string | null;
+  definitions: string[];
+  arabic: string[];
+  lemma: string | null;
+}
+
+export interface DictionaryResult {
+  query: string;
+  normalized: string;
+  matchedBy: "word" | "form" | null;
+  lemmas: string[];
+  entries: DictionaryEntry[];
+  forms: string[];
+  source: {
+    name: string;
+    license: string;
+    url: string;
+  };
+}
+
+export type TranscriptionState =
+  | "queued"
+  | "downloading"
+  | "transcribing"
+  | "saving"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface TranscriptionJob {
+  id: string;
+  episodeId: number;
+  state: TranscriptionState;
+  model: string;
+  language: string;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+  error: string | null;
+  audioBytes: number | null;
+  cueCount: number | null;
+}
+
+export interface TranscriptionStatus {
+  available: boolean;
+  reason: string | null;
+  job: TranscriptionJob | null;
 }
 
 export interface PodcastResponse {

@@ -103,7 +103,7 @@ export function Home() {
         <div className="pointer-events-none absolute -right-16 -top-24 h-72 w-72 rounded-full border border-line/70" />
         <div className="pointer-events-none absolute -right-4 -top-10 h-48 w-48 rounded-full border border-line/60" />
         <div className="relative max-w-2xl">
-          <p className="eyebrow">Your listening desk · Phase 2</p>
+          <p className="eyebrow">Your listening desk · Phase 3</p>
           <h1 className="mt-4 font-serif text-4xl leading-[1.02] text-fg sm:text-5xl md:text-6xl">
             Listen closely.
             <br />

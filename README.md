@@ -1,16 +1,19 @@
 # Podcast Language Studio
 
-A local-first podcast player for language learners. Phase 2 gives you a real listening
-foundation plus transcripts: import public RSS feeds, browse a hand-checked catalog,
-preview shows before adding them, play episodes in a persistent player, and read along
-with publisher or imported transcripts.
+A local-first podcast player for language learners. Phase 3 gives you a real listening
+foundation, transcripts, a local Wiktionary dictionary, and local Whisper transcription:
+import public RSS feeds, browse a hand-checked catalog, preview shows before adding them,
+play episodes in a persistent player, read along with publisher or imported transcripts,
+look up words without a dictionary service, and transcribe an episode on your own CPU.
 
 No account. No API keys. No analytics. Your library, listening positions, and transcripts
 live in a SQLite file on your own computer; small display and playback preferences stay in
-browser local storage.
+browser local storage. The dictionary and Whisper installation are reused from their
+existing locations rather than copied into this project.
 
-> Status: **Phase 2 — transcripts**. Vocabulary, shadowing, and Android are planned for
-> later phases. Labels in the interface say “Soon” when a feature is not built yet.
+> Status: **Phase 3 — local language tools**. Vocabulary, shadowing, and Android are
+> planned for later phases. Labels in the interface say “Soon” when a feature is not built
+> yet.
 
 ## What works
 
@@ -34,6 +37,15 @@ browser local storage.
   SubRip, Podcasting 2.0 JSON, or plain-text file. Timed transcripts highlight the current
   line, scroll with playback, and let you click a timestamp to seek. Untimed text is kept
   as a reading view. Transcripts are stored locally and fetched only when you ask.
+- **Local dictionary** — search the existing Wiktionary SQLite database for definitions,
+  IPA, Arabic translations, and available word forms. It is opened read-only; no lookup
+  leaves the computer.
+- **Local Whisper transcription** — start an explicit transcription job for an episode.
+  The server downloads the audio to a temporary folder, runs the existing Whisper CLI on
+  CPU, parses its WebVTT output, saves timestamped cues locally, and deletes the temporary
+  audio. The job can be followed or cancelled in the transcript panel.
+- **Resource status** — Settings shows whether the Whisper executable/model and dictionary
+  database are available, which paths are being used, and how to override them.
 - **Light / dark / system theme** — applied before paint to avoid a flash, and remembered
   in local storage.
 - **Responsive interface** — desktop sidebar, mobile top navigation, bottom mini player,
@@ -65,19 +77,71 @@ or remove the local copy.
 The importer accepts pasted text or a file up to 4 MB. Publisher HTML transcript pages are
 not scraped; the app explains that limitation and keeps the manual import path available.
 
+## Existing local language tools
+
+This project does not install, download, copy, or rebuild Whisper models or dictionary
+data. It deliberately reuses the two resources already present on this computer. Both
+paths are configurable, and the application reports a clear unavailable state if either
+one is missing.
+
+### OpenAI Whisper
+
+- Executable: `/home/nail/whisper-env/bin/whisper` by default.
+- Model cache: `/home/nail/.cache/whisper` by default; the cached `base.en.pt` model is used.
+- How a job runs: the server downloads the episode audio to a temporary OS folder, runs
+  the existing CLI with `--device cpu`, `--task transcribe`, and `--output_format vtt`,
+  then parses that VTT and stores the cues in this app's SQLite database. The temporary
+  audio and VTT are deleted when the job finishes.
+- No model is downloaded by this app. If the selected model is not already cached, the
+  transcription starts with a clear error instead of fetching weights.
+- `base.en` is English-only. Set `PODCAST_WHISPER_MODEL` to a multilingual model that is
+  already cached before choosing another language.
+- Only one job per episode is active at a time. Job status is kept in server memory; a
+  server restart does not keep a running job alive. Completed transcripts are saved and
+  remain available.
+- Verified with the existing `openai-whisper 20250625`, `torch 2.15.0+cpu`, `base.en`
+  model, and system `ffmpeg 6.1.1`. The application never upgrades or modifies that
+  virtual environment.
+
+### Wiktionary dictionary
+
+- Database: `/home/nail/.local/share/podcast-language-studio/dictionary.db` by default.
+- It is opened with SQLite read-only mode and `query_only`, so lookups cannot modify,
+  delete, or rebuild it.
+- Lookups return definitions, IPA, Arabic translations when present, and forms collected
+  from the database's `forms` table. The database contains about 1.16 million entries and
+  579,000 forms.
+- Data source: Wiktionary, extracted by Wiktextract (kaikki.org). License: CC BY-SA 4.0
+  and GFDL. The source and license are shown in the Dictionary page and Settings.
+- The app does not create a second dictionary file or copy data into its own database.
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `PODCAST_DICTIONARY_DB` | `~/.local/share/podcast-language-studio/dictionary.db` | Read-only dictionary database |
+| `PODCAST_WHISPER_BIN` | `~/whisper-env/bin/whisper` | Existing Whisper executable or command name |
+| `PODCAST_WHISPER_MODEL` | `base.en` | Cached model name, without `.pt` |
+| `PODCAST_WHISPER_MODEL_DIR` | `~/.cache/whisper` | Folder containing the cached model |
+| `PODCAST_WHISPER_DEVICE` | `cpu` | Whisper device (`cpu` or a supported GPU device) |
+| `PODCAST_WHISPER_LANGUAGE` | `en` | Default transcription language |
+| `PODCAST_WHISPER_THREADS` | `4` | CPU threads passed to Whisper |
+| `PODCAST_WHISPER_MAX_AUDIO_BYTES` | `262144000` (250 MB) | Safety cap for temporary audio |
+| `PODCAST_WHISPER_DOWNLOAD_TIMEOUT_MS` | `300000` (5 min) | Temporary audio download timeout |
+| `PODCAST_WHISPER_TIMEOUT_MS` | `3600000` (1 hour) | Maximum Whisper process time |
+
 ## Not built yet
 
-These are honest Phase 2 boundaries, not hidden buttons:
+These are honest Phase 3 boundaries, not hidden buttons:
 
-- Automatic speech-to-text transcription of audio
-- Translation of transcripts
+- Automatic transcription on episode open (transcription is always explicit)
+- Cloud transcription, translation, or dictionary APIs
 - Scraping arbitrary HTML transcript pages (paste the text instead)
-- Vocabulary collection and study sheets (Phase 3)
-- Shadowing and local recording (Phase 4)
+- Vocabulary collection and study sheets (Phase 4)
+- Shadowing and local recording (Phase 5)
 - OPML import/export
-- Offline audio downloads
+- Offline audio downloads (temporary transcription audio is deleted)
 - Android app
 - A podcast directory API or scraping of sites that block automated requests
+- Editing or adding entries in the borrowed dictionary database
 
 ## Requirements
 
@@ -85,6 +149,10 @@ These are honest Phase 2 boundaries, not hidden buttons:
 - A modern browser with HTML audio support
 - Linux, macOS, or Windows. The data path defaults to a Linux-style `~/.local/share`
   location; set `PODCAST_STUDIO_DATA` on other systems if you prefer another folder.
+- Optional, for the local tools: an existing OpenAI Whisper environment with a cached
+  model, and an existing `dictionary.db` created by Wiktextract. The rest of the app works
+  without them; the dictionary page and transcribe button report the missing resource
+  instead of pretending it exists.
 
 ## Quick start
 
@@ -139,8 +207,11 @@ PODCAST_STUDIO_DATA=/path/to/podcast-data npm start
 ```
 
 - The database uses SQLite in WAL mode with foreign keys enabled.
-- Audio is **streamed from the publisher** and is not downloaded or copied into the
-  database.
+- Audio is normally **streamed from the publisher** and is not copied into the database.
+  A local transcription temporarily downloads the episode audio to the OS temp folder and
+  deletes it after Whisper finishes or the job is cancelled.
+- The dictionary database and Whisper model live outside this project's data folder and
+  are never copied into it. The dictionary is opened read-only.
 - Transcripts are stored in the same database as parsed cues. Removing a podcast or
   episode removes its transcript; removing a transcript does not affect the audio or your
   progress.
@@ -150,24 +221,30 @@ PODCAST_STUDIO_DATA=/path/to/podcast-data npm start
   Override with `HOST` and `PORT` if you know what you are doing.
 - To back up, stop the server and copy the whole data folder (including `app.db-wal` and
   `app.db-shm` if present).
-- The old prototype's data folder (`~/.local/share/podcast-language-studio`) is never
-  touched by this project.
+- The old prototype's dictionary is read from `~/.local/share/podcast-language-studio`
+  only when you request a lookup; the file is opened read-only and is never modified. The
+  rest of that prototype's data is not used by this project.
 
 ## Privacy and network behavior
 
 - No accounts, tracking scripts, analytics, or third-party APIs.
 - The server only fetches a URL when you ask it to resolve, preview, add, or refresh a
-  feed, or when you explicitly load a transcript.
+  feed, explicitly load a transcript, or start a local transcription (which fetches the
+  episode audio).
 - Before fetching, it resolves the hostname and rejects loopback, private, link-local,
   unique-local, and unspecified addresses. Redirects are followed manually, one hop at a
   time, and every hop is checked again.
 - Feed downloads are limited to 20 MB and 20 seconds; transcript downloads are limited to
-  4 MB.
-- Feed and transcript contents are parsed as data, never executed.
+  4 MB. Temporary audio for transcription is capped at 250 MB and five minutes by default.
+- Feed, transcript, and audio response bodies are treated as untrusted data. Feed and
+  transcript text is parsed, never executed.
+- Whisper runs locally. The model, executable, and dictionary are never uploaded. The
+  dictionary lookup path has no network code at all.
 - Imported transcripts are sent only to your local server and written to your local
   database; they are not uploaded to a third-party service.
 - The UI has no fake “implemented” states: planned practice features are visibly marked
-  “Soon”.
+  “Soon”. When Whisper or the dictionary is missing, the UI says so instead of showing a
+  button that cannot work.
 
 ## Discovery, without an API
 
@@ -195,14 +272,16 @@ instead of pretending to search it. OPML import is planned.
 │   │   │   ├── rss.ts      RSS/Atom parsing and normalization
 │   │   │   ├── transcript.ts  VTT/SRT/JSON/plain-text parsing
 │   │   │   ├── transcripts.ts Transcript and cue storage queries
-│   │   │   ├── http.ts     SSRF-safe fetch with manual redirect checks
+│   │   │   ├── dictionary.ts Read-only Wiktionary database queries
+│   │   │   ├── whisper.ts   Local Whisper job manager and VTT import
+│   │   │   ├── http.ts     SSRF-safe fetch and temporary audio downloads
 │   │   │   ├── discovery.ts Website/feed resolution and previews
 │   │   │   ├── catalog.ts  Curated catalog loading and search
 │   │   │   └── library.ts  Podcast, episode, and progress queries
 │   │   └── test/           Vitest unit and API tests
 │   └── web/               React 19 + TypeScript + Vite + Tailwind 4
 │       └── src/
-│           ├── pages/      Home, Discover, Library, Episodes, Episode, Settings
+│           ├── pages/      Home, Discover, Library, Episodes, Episode, Dictionary, Settings
 │           ├── components/ Layout, player, cards, dialogs, pagination
 │           ├── player/     Global audio state and progress saving
 │           └── theme/      Light/dark/system handling
@@ -218,6 +297,8 @@ All routes are under `/api`.
 | ------ | ---------------------------- | ------------------------------------------ |
 | GET    | `/health`                    | Health check                               |
 | GET    | `/meta`                      | Version, data directory, library stats     |
+| GET    | `/resources`                 | Local Whisper and dictionary status        |
+| GET    | `/dictionary/lookup?word=...`| Read-only dictionary lookup                 |
 | GET    | `/discovery/catalog`         | Search/filter the curated catalog          |
 | POST   | `/discovery/resolve`         | Resolve a feed or website and preview it   |
 | GET    | `/podcasts`                  | List saved podcasts                        |
@@ -230,13 +311,16 @@ All routes are under `/api`.
 | GET    | `/episodes/:id/transcript`   | Read the cached transcript                  |
 | POST   | `/episodes/:id/transcript`   | Load from feed/URL or import pasted text    |
 | DELETE | `/episodes/:id/transcript`   | Remove the local transcript copy            |
+| GET    | `/episodes/:id/transcription`| Check the current local Whisper job         |
+| POST   | `/episodes/:id/transcribe`   | Start a local Whisper transcription         |
+| DELETE | `/episodes/:id/transcription`| Cancel the active local transcription       |
 | PUT    | `/episodes/:id/progress`     | Save position and/or status                |
 | GET    | `/home`                      | Stats, continue-listening, recent episodes |
 
 Errors return `{ "error": "..." }` with a meaningful status code: `400` for validation,
 `404` for missing records, `409` for duplicate feeds, `413` for oversized transcript
-imports, `422` for feeds or transcripts that cannot be read, and `500` for unexpected
-server errors.
+imports, `422` for feeds or transcripts that cannot be read, `503` when a local resource
+is missing, and `500` for unexpected server errors.
 
 ## Testing
 
@@ -256,11 +340,19 @@ The server suite covers:
 - Adding, refreshing, and deleting podcasts
 - Episode listing, pagination, and progress status transitions
 - Private/loopback address rejection, redirect re-validation, and fetch size limits
+- Dictionary direct lookups, lemma/form lookups, JSON fields, attribution, and missing DBs
+  using a temporary fixture database
 
 The tests use fixtures and an injected fetch function, so they do not need the network.
 Manual QA should still try a real feed with transcripts, such as
 `https://podnews.net/rss`, and confirm that loading, seeking, and removing a transcript
 work. Also try a feed without transcripts and import a pasted VTT file.
+
+For the local tools, run `npm start`, open Settings, and confirm both resources show as
+available. Look up `podcast`, `language`, and `running` in the Dictionary page, then
+transcribe a short episode from the transcript panel. The actual verification used a
+three-minute Podnews episode; Whisper `base.en` produced 40 timestamped cues, which were
+saved with origin `whisper`, and the temporary audio folder was removed.
 
 ## Design notes
 
@@ -278,8 +370,10 @@ playback progress is saved, and how transcripts are fetched, parsed, and stored.
   positions, themes, responsive UI.
 - **Phase 2 (done)** — feed and imported transcripts, line-synced highlighting,
   click-to-seek, search, and local transcript storage.
-- **Phase 3** — vocabulary collection and study sheets.
-- **Phase 4** — shadowing loops and local recording.
+- **Phase 3 (done)** — read-only Wiktionary dictionary lookups and explicit local Whisper
+  transcription using the resources already on this computer.
+- **Phase 4** — vocabulary collection and study sheets.
+- **Phase 5** — shadowing loops and local recording.
 - **Later** — OPML import/export, offline audio, Android client.
 
 ## Independence

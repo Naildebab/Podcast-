@@ -1,7 +1,7 @@
 import type { Db } from "./db.js";
 import type { ParsedTranscript, TranscriptCue, TranscriptFormat } from "./transcript.js";
 
-export type TranscriptOrigin = "feed" | "manual";
+export type TranscriptOrigin = "feed" | "manual" | "whisper";
 
 export interface StoredTranscriptCue extends TranscriptCue {
   index: number;
@@ -62,7 +62,12 @@ export function getTranscript(db: Db, episodeId: number): StoredTranscript | nul
     episodeId: row.episode_id,
     sourceUrl: row.source_url,
     format: row.format as TranscriptFormat,
-    origin: row.origin === "feed" ? "feed" : "manual",
+    origin:
+      row.origin === "feed"
+        ? "feed"
+        : row.origin === "whisper"
+          ? "whisper"
+          : "manual",
     language: row.language,
     timed: row.timed === 1,
     cueCount: row.cue_count,

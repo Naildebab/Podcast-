@@ -82,6 +82,27 @@ const MIGRATIONS: string[] = [
   CREATE INDEX idx_transcript_cues_episode_start
     ON transcript_cues(episode_id, start_ms);
   `,
+  `
+  CREATE TABLE transcripts_v3 (
+    episode_id INTEGER PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+    source_url TEXT,
+    format TEXT NOT NULL,
+    origin TEXT NOT NULL CHECK (origin IN ('feed', 'manual', 'whisper')),
+    language TEXT,
+    timed INTEGER NOT NULL DEFAULT 0,
+    cue_count INTEGER NOT NULL DEFAULT 0,
+    imported_at TEXT NOT NULL
+  );
+
+  INSERT INTO transcripts_v3
+    (episode_id, source_url, format, origin, language, timed, cue_count, imported_at)
+  SELECT
+    episode_id, source_url, format, origin, language, timed, cue_count, imported_at
+  FROM transcripts;
+
+  DROP TABLE transcripts;
+  ALTER TABLE transcripts_v3 RENAME TO transcripts;
+  `,
 ];
 
 export function migrate(db: Db): void {

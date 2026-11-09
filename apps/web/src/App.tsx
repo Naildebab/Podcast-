@@ -1,6 +1,7 @@
 import { Route, Routes } from "react-router-dom";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Layout } from "./components/Layout";
+import { Dictionary } from "./pages/Dictionary";
 import { Discover } from "./pages/Discover";
 import { EpisodePage } from "./pages/EpisodePage";
 import { Episodes } from "./pages/Episodes";
@@ -21,6 +22,7 @@ export default function App() {
           <Route path="library/:id" element={<PodcastDetail />} />
           <Route path="episodes" element={<Episodes />} />
           <Route path="episodes/:id" element={<EpisodePage />} />
+          <Route path="dictionary" element={<Dictionary />} />
           <Route path="settings" element={<Settings />} />
           <Route path="*" element={<NotFound />} />
         </Route>
